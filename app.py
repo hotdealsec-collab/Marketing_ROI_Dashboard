@@ -161,11 +161,37 @@ if adj_file and int_file:
         ).properties(height=400).interactive()
         st.altair_chart(scatter, use_container_width=True)
 
+       # Campaign Table
         st.markdown("### Campaign Table")
         def style_red(val):
             return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
         
-        display_cols = ["campaign_network", "channel", "os_name", "growth_health_score", "growth_category", "bm_rate", "intensity", "retention_d7"]
-        st.dataframe(f_df[display_cols].style.map(style_red, subset=["growth_health_score"]), use_container_width=True, height=500)
+        # Growth Score 관련 모든 컬럼을 추가했습니다.
+        display_cols = [
+            "campaign_network", "channel", "os_name", 
+            "growth_category", "growth_health_score", "confidence_score",
+            "cpi", "s_traffic", 
+            "activation", "s_activation", 
+            "intensity", "s_intensity", 
+            "retention_d7", "s_retention", 
+            "bm_rate", "s_bm", 
+            "payback", "s_payback"
+        ]
+        
+        # 소수점 출력을 깔끔하게 하기 위해 포맷팅 적용 (선택 사항)
+        st.dataframe(
+            f_df[display_cols].style
+            .map(style_red, subset=["growth_health_score"])
+            .format({
+                "cpi": "{:.2f}",
+                "activation": "{:.1%}",
+                "intensity": "{:.2f}",
+                "retention_d7": "{:.1%}",
+                "bm_rate": "{:.1%}",
+                "payback": "{:.2f}"
+            }, na_rep="N/A"), 
+            use_container_width=True, 
+            height=500
+        )
 else:
     st.info("左右のCSVファイルをアップロードしてください。")
