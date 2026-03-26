@@ -9,7 +9,6 @@ import re
 # --------------------------------------------------
 st.set_page_config(page_title="Piccoma Growth Audit Pro", layout="wide")
 
-# Overview 렌더링 오류를 유발했던 .stMetric 관련 CSS를 삭제했습니다.
 st.markdown("""
 <style>
 .block-container { padding-top: 1.5rem; }
@@ -42,12 +41,22 @@ def run_growth_audit(df_adj, df_int):
     df_adj = df_adj.dropna(subset=['campaign_network']).copy()
     df_adj['campaign_network'] = df_adj['campaign_network'].astype(str).str.strip()
     
+    # OSが複数ある場合は "Cross-platform" に統一する関数
+    def get_os_label(x):
+        unique_os = sorted(x.dropna().unique().astype(str).tolist())
+        if len(unique_os) > 1:
+            return "Cross-platform"
+        elif len(unique_os) == 1:
+            return unique_os[0]
+        else:
+            return np.nan
+
     adj_grouped = df_adj.groupby('campaign_network').agg({
         'cost': 'sum',
         'installs': 'sum',
         'all_revenue': 'sum',
         'channel': lambda x: ', '.join(x.dropna().unique().astype(str)),
-        'os_name': lambda x: ', '.join(x.dropna().unique().astype(str))
+        'os_name': get_os_label
     }).reset_index()
 
     # --- 2. 内部データのクレンジングと集計 ---
@@ -87,7 +96,6 @@ def run_growth_audit(df_adj, df_int):
     df["s_retention"] = df["retention_d7"].apply(lambda x: 50 if pd.isna(x) else (100 if x >= 0.25 else (60 if x >= 0.15 else 30)))
     df["s_bm"] = df["bm_rate"].apply(lambda x: "不明" if pd.isna(x) or pd.isna(avg_bm) else ("良好" if x >= avg_bm*1.15 else ("普通" if x >= avg_bm*0.85 else "注意"))).map(map_score)
     
-    # cost가 0인 경우 s_payback을 0으로 처리
     df["s_payback"] = df.apply(
         lambda x: 0 if x["cost"] == 0 else (
             50 if pd.isna(x["payback"]) else (100 if x["payback"] <= 1.2 else (60 if x["payback"] <= 2.5 else 20))
@@ -127,22 +135,33 @@ if adj_file and int_file:
     if audit_df.empty:
         st.error("❌ キャンペーンの一致が確認できませんでした。Adjustの'campaign_network'と社内データの'campaign_name'を確認してください。")
     else:
-        # --- Filters (필터를 먼저 배치해야 Overview를 필터링된 데이터 기준으로 계산 가능) ---
+        # --- Filters ---
         st.markdown("### Filters")
         f1, f2, f3, f4 = st.columns(4)
         
-        sel_ch = f1.selectbox("Channel", ["All"] + sorted(audit_df['channel'].dropna().unique().tolist()))
-        sel_os = f2.selectbox("OS", ["All"] + sorted(audit_df['os_name'].dropna().unique().tolist()))
-        sel_cp = f3.selectbox("Campaign", ["All"] + sorted(audit_df['campaign_network'].dropna().unique().tolist()))
-        sel_ct = f4.selectbox("Growth Category", ["All"] + sorted(audit_df['growth_category'].dropna().unique().tolist()))
+        channel_opts = sorted(audit_df['channel'].dropna().unique().tolist())
+        sel_ch = f1.multiselect("Channel", channel_opts, placeholder="All (Select to filter)")
+        
+        os_opts = sorted(audit_df['os_name'].dropna().unique().tolist())
+        sel_os = f2.selectbox("OS", ["All"] + os_opts)
+        
+        campaign_opts = sorted(audit_df['campaign_network'].dropna().unique().tolist())
+        sel_cp = f3.multiselect("Campaign", campaign_opts, placeholder="All (Select to filter)")
+        
+        category_opts = sorted(audit_df['growth_category'].dropna().unique().tolist())
+        sel_ct = f4.selectbox("Growth Category", ["All"] + category_opts)
 
         f_df = audit_df.copy()
-        if sel_ch != "All": f_df = f_df[f_df['channel'].str.contains(sel_ch, na=False)]
-        if sel_os != "All": f_df = f_df[f_df['os_name'].str.contains(sel_os, na=False)]
-        if sel_cp != "All": f_df = f_df[f_df['campaign_network'] == sel_cp]
-        if sel_ct != "All": f_df = f_df[f_df['growth_category'] == sel_ct]
+        if sel_ch:
+            f_df = f_df[f_df['channel'].isin(sel_ch)]
+        if sel_os != "All":
+            f_df = f_df[f_df['os_name'] == sel_os]
+        if sel_cp:
+            f_df = f_df[f_df['campaign_network'].isin(sel_cp)]
+        if sel_ct != "All":
+            f_df = f_df[f_df['growth_category'] == sel_ct]
 
-        # --- Overview (필터링된 데이터인 f_df를 기준으로 평균 점수 계산) ---
+        # --- Overview ---
         st.markdown("### Overview")
         k1, k2, k3 = st.columns(3)
         
@@ -163,7 +182,6 @@ if adj_file and int_file:
         
         f_df_plot = f_df.copy()
         
-        # 실제 데이터가 겹치지 않도록 Jitter(노이즈) 추가
         np.random.seed(42) 
         f_df_plot["plot_x"] = f_df_plot["growth_health_score"] + np.random.uniform(-1.0, 1.0, len(f_df_plot))
         f_df_plot["plot_y"] = f_df_plot["confidence_score"] + np.random.uniform(-1.0, 1.0, len(f_df_plot))
@@ -178,15 +196,33 @@ if adj_file and int_file:
         st.altair_chart(scatter, use_container_width=True)
 
         # --- Campaign Table ---
-        st.markdown("### Campaign Table")
-        def style_red(val):
-            return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
+        # 다운로드 버튼과 테이블 제목을 같은 줄에 배치하기 위해 컬럼 사용
+        col_title, col_btn = st.columns([4, 1])
+        col_title.markdown("### Campaign Table")
         
         display_cols = [
             "campaign_network", "channel", "os_name", 
             "growth_category", "growth_health_score", "confidence_score",
             "cpi", "activation", "intensity", "retention_d7", "bm_rate", "payback"
         ]
+
+        # CSV 변환 함수 (Excel에서 일본어 깨짐 방지를 위해 utf-8-sig 사용)
+        @st.cache_data
+        def convert_df(df):
+            return df.to_csv(index=False).encode('utf-8-sig')
+
+        csv_data = convert_df(f_df[display_cols])
+
+        # 다운로드 버튼
+        col_btn.download_button(
+            label="📥 Download CSV",
+            data=csv_data,
+            file_name='campaign_health_check.csv',
+            mime='text/csv',
+        )
+
+        def style_red(val):
+            return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
         
         st.dataframe(
             f_df[display_cols].style
