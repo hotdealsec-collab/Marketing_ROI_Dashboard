@@ -1,133 +1,182 @@
-import streamlit as st
+import numpy as np
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
+import streamlit as st
+import altair as alt
 from rapidfuzz import process
 
-# --- ページ設定 ---
-st.set_page_config(page_title="Piccoma Executive Dashboard", layout="wide")
+# --------------------------------------------------
+# Page Config & Styles
+# --------------------------------------------------
+st.set_page_config(page_title="Piccoma Campaign Health Check", layout="wide")
 
-st.title("📊 広告投資対効果(ROAS)＆媒体品質 経営ダッシュボード")
-st.markdown("外部MMP(Adjust)の獲得データと内部データベースを統合し、真のマーケティングROIとユーザーの質を可視化します。")
+st.markdown("""
+<style>
+.block-container { padding-top: 1.8rem; padding-bottom: 2rem; }
+.small-note { color: #6b7280; font-size: 0.9rem; }
+.mono-box { 
+    background-color: #111827; color: #f9fafb; padding: 1rem 1.2rem; 
+    border-radius: 12px; border: 1px solid #1f2937; font-family: monospace; font-size: 0.85rem; 
+}
+.section-caption { color: #9ca3af; font-size: 0.88rem; margin-bottom: 0.8rem; }
+</style>
+""", unsafe_allow_html=True)
 
-# --- サイドバー：ファイルアップロード ---
-st.sidebar.header("1. データアップロード")
-adjust_file = st.sidebar.file_uploader("Adjustレポート (CSV)", type="csv")
-internal_file = st.sidebar.file_uploader("社内行動データ (CSV)", type="csv")
+# --------------------------------------------------
+# Helpers & Scoring Logic (User Template 기반)
+# --------------------------------------------------
+def safe_divide(a, b):
+    return a / b if (pd.notna(a) and pd.notna(b) and b != 0) else np.nan
 
-if adjust_file and internal_file:
-    # データ読み込み
-    df_adj = pd.read_csv(adjust_file)
-    df_int = pd.read_csv(internal_file)
+def rate_relative_low_is_good(value, avg_value):
+    if pd.isna(value) or pd.isna(avg_value): return "不明"
+    if value <= avg_value * 0.85: return "良好"
+    elif value <= avg_value * 1.15: return "普通"
+    return "注意"
 
-    # --- データ前処理 & マッチング ---
-    # 社内データのキャンペーン名からIDを分離する処理
+def rate_relative_high_is_good(value, avg_value):
+    if pd.isna(value) or pd.isna(avg_value): return "不明"
+    if value >= avg_value * 1.15: return "良好"
+    elif value >= avg_value * 0.85: return "普通"
+    return "注意"
+
+def map_score(value):
+    score_map = {"良好": 100, "普通": 60, "注意": 30, "リスクあり": 20, "不明": 50}
+    return score_map.get(value, 50)
+
+def score_category(score):
+    if score >= 80: return "健全"
+    if score >= 60: return "観察"
+    if score >= 40: return "注意"
+    return "要確認"
+
+# --------------------------------------------------
+# Data Processing Engine
+# --------------------------------------------------
+def run_growth_audit_piccoma(df_adj, df_int):
+    # 1. 캠페인명 매칭 (Fuzzy Matching)
     df_int['campaign_clean'] = df_int['campaign_name'].str.split(' \(').str[0].str.strip()
-    
-    # Adjustのキャンペーンリスト
     adj_campaigns = df_adj['campaign_network'].unique().tolist()
-
-    # マッチング関数の定義
+    
     def find_match(name):
-        if pd.isna(name): return None
         match = process.extractOne(name, adj_campaigns, score_cutoff=80)
         return match[0] if match else None
 
-    with st.spinner('データを統合中...'):
-        df_int['matched_campaign'] = df_int['campaign_clean'].apply(find_match)
-
-    # データの結合
-    df_merged = pd.merge(
-        df_adj, df_int, left_on='campaign_network', right_on='matched_campaign', how='inner'
-    )
-
-    # --- 指標計算 ---
-    # 流入数とROASの計算
-    df_merged['mmp_total_inflow'] = df_merged['first_login_events'] + df_merged['reattributions']
-    df_merged['Actual_ROAS'] = (df_merged['r_sales'] / df_merged['cost']) * 100
-    df_merged['Reading_Rate'] = (df_merged['ru_count'] / df_merged['user_count']) * 100
-    df_merged['Discrepancy_Rate'] = ((df_merged['mmp_total_inflow'] - df_merged['user_count']) / df_merged['mmp_total_inflow']) * 100
+    df_int['matched_campaign'] = df_int['campaign_clean'].apply(find_match)
     
-    # ユーザー品質分類用データの生成
-    df_merged['Inactive_Users'] = df_merged['user_count'] - df_merged['ru_count']
-    df_merged['Active_Free_Users'] = df_merged['ru_count'] - df_merged['pu_count']
-    df_merged['Paying_Users'] = df_merged['pu_count']
+    # 2. 데이터 병합
+    df = pd.merge(df_adj, df_int, left_on='campaign_network', right_on='matched_campaign', how='inner')
+    
+    # 3. 핵심 지표 계산 (Piccoma BM 중심)
+    df["cpi"] = df.apply(lambda x: safe_divide(x["cost"], x["installs"]), axis=1)
+    df["activation_rate"] = df.apply(lambda x: safe_divide(x["ru_count"], x["user_count"]), axis=1) # 독자 전환율
+    df["bm_usage_rate"] = df.apply(lambda x: safe_divide(x["bm_user_count"], x["user_count"]), axis=1) # BM 기여도
+    df["payback_ratio"] = df.apply(lambda x: safe_divide(x["cost"], x["r_sales"]), axis=1) # 회수비율
+    
+    # 리텐션 기반 Early Signal
+    df["d1_ret_rate"] = df.apply(lambda x: safe_divide(x["d1_count"], x["ru_count"]), axis=1)
+    df["d7_ret_rate"] = df.apply(lambda x: safe_divide(x["d7_count"], x["ru_count"]), axis=1)
+    df["early_signal_score"] = (df["d1_ret_rate"] * 0.3 + df["d7_ret_rate"] * 0.7) * 100
 
-    # --- TOP: 核心 KPI ---
-    total_cost = df_merged['cost'].sum()
-    total_sales = df_merged['r_sales'].sum()
-    avg_roas = (total_sales / total_cost) * 100
-    avg_discrepancy = ((df_merged['mmp_total_inflow'].sum() - df_merged['user_count'].sum()) / df_merged['mmp_total_inflow'].sum()) * 100
+    # 4. 상대평가 및 스코어링
+    avg_cpi = df["cpi"].mean()
+    avg_bm_rate = df["bm_usage_rate"].mean()
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("総広告費", f"¥{total_cost:,.0f}")
-    col2.metric("総実売上", f"¥{total_sales:,.0f}")
-    col3.metric("総合ROAS", f"{avg_roas:.1f}%")
-    col4.metric("平均データ乖離率", f"{avg_discrepancy:.1f}%", delta_color="inverse")
+    df["traffic_efficiency"] = df["cpi"].apply(lambda x: rate_relative_low_is_good(x, avg_cpi))
+    df["activation_health"] = df["activation_rate"].apply(lambda x: "良好" if x >= 0.7 else ("普通" if x >= 0.5 else "注意"))
+    df["bm_contribution"] = df["bm_usage_rate"].apply(lambda x: rate_relative_high_is_good(x, avg_bm_rate))
+    df["payback_health"] = df["payback_ratio"].apply(lambda x: "良好" if x <= 1.0 else ("普通" if x <= 2.0 else "リスクあり"))
 
-    st.divider()
+    # Growth Health Score (가중치 조정: BM 기여도 중심)
+    df["traffic_score"] = df["traffic_efficiency"].map(map_score)
+    df["activation_score"] = df["activation_health"].map(map_score)
+    df["bm_score"] = df["bm_contribution"].map(map_score)
+    df["payback_score"] = df["payback_health"].map(map_score)
+    
+    df["growth_health_score"] = (
+        df["traffic_score"] * 0.15 +
+        df["activation_score"] * 0.20 +
+        df["bm_score"] * 0.40 + # BM 공헌도에 가장 높은 가중치
+        df["payback_score"] * 0.25
+    ).round(1)
+    
+    df["growth_category"] = df["growth_health_score"].apply(score_category)
 
-    # --- AIによる分析コメント ---
-    st.info(f"""
-    💡 **[AIによる分析コメント]**
-    * **全体成果の要約:** 現在実行されているマーケティングの統合ROASは **{avg_roas:.1f}%** です。
-    * **データの整合性:** 外部媒体から流入したと報告されたユーザーと、内部の実際の流入ユーザーとの間に **{avg_discrepancy:.1f}%** の乖離が発生しています。乖離率が異常に高いキャンペーンは、トラッキング漏れや不正トラフィック（Fraud）の確認が必要です。
-    * **意思決定の提案:** 下部の「投資効率ポートフォリオ（Magic Quadrant）」で、**第1象限（右上）**に位置するキャンペーンには予算を増額し、**第3象限（左下）**のキャンペーンは即時の停止またはクリエイティブの変更を推奨します。
-    """)
+    # 5. Measurement Confidence Score (제공해주신 로직 반영)
+    def calc_confidence(row):
+        score = 100
+        if row["cost"] == 0: score -= 50
+        if row["installs"] == 0: score -= 30
+        if str(row["os_name"]).lower() == "ios": score -= 15
+        if row.get("skad_installs", 0) > 0: score -= 10 # SKAN 비중이 있으면 신뢰도 감점
+        return max(score, 0)
 
-    st.divider()
+    df["confidence_score"] = df.apply(calc_confidence, axis=1)
+    
+    return df
 
-    # --- SECTION 1: 外部 vs 内部 乖離率分析（予算漏れの検知） ---
-    st.subheader("1. MMP vs 内部データ乖離率 (予算漏れの検知)")
-    fig_scatter_disc = px.scatter(
-        df_merged, x="mmp_total_inflow", y="user_count", 
-        hover_name="campaign_network", size="cost", color="channel",
-        labels={"mmp_total_inflow": "MMP報告流入数 (Adjust)", "user_count": "実際の内部流入数 (DB)"},
-        title="流入数の乖離 (基準線より下は「虚数トラフィック」の疑いあり)"
-    )
-    # 理想的な基準線 (X=Y) を追加
-    max_val = max(df_merged['mmp_total_inflow'].max(), df_merged['user_count'].max())
-    fig_scatter_disc.add_shape(type="line", x0=0, y0=0, x1=max_val, y1=max_val, line=dict(color="red", dash="dash"))
-    st.plotly_chart(fig_scatter_disc, use_container_width=True)
+# --------------------------------------------------
+# UI Components
+# --------------------------------------------------
+st.markdown("## 📊 Piccoma Campaign Health Check")
+st.markdown("<div class='small-note'>外部獲得効率 × 内部BM貢献度 × 測定信頼度の統合分析</div>", unsafe_allow_html=True)
 
-    # --- SECTION 2: 媒体別のユーザー品質分析 ---
-    st.subheader("2. 媒体別ユーザー品質分析 (真の価値を生むチャネル)")
-    df_quality = df_merged.groupby('channel')[['Inactive_Users', 'Active_Free_Users', 'Paying_Users']].sum().reset_index()
-    fig_bar_quality = px.bar(
-        df_quality, x="channel", y=['Inactive_Users', 'Active_Free_Users', 'Paying_Users'],
-        title="チャネル別ユーザー行動の質 (100%積み上げ)",
-        labels={"value": "ユーザー数", "variable": "ユーザータイプ", "channel": "流入元"},
-        color_discrete_map={"Inactive_Users": "lightgray", "Active_Free_Users": "lightblue", "Paying_Users": "crimson"}
-    )
-    fig_bar_quality.update_layout(barmode='relative')
-    st.plotly_chart(fig_bar_quality, use_container_width=True)
+# Sidebar: Upload
+st.sidebar.header("📁 Data Upload")
+adj_file = st.sidebar.file_uploader("1. Adjust Data (External)", type="csv")
+int_file = st.sidebar.file_uploader("2. Internal SQL Data (Internal)", type="csv")
 
-    # --- SECTION 3: 投資効率ポートフォリオ（予算再配分） ---
-    st.subheader("3. 投資効率ポートフォリオ (Magic Quadrant)")
-    fig_quadrant = px.scatter(
-        df_merged, x="Reading_Rate", y="Actual_ROAS", size="cost", color="channel",
-        hover_name="campaign_network",
-        labels={"Reading_Rate": "作品閲覧転換率 (%)", "Actual_ROAS": "実ROAS (%)"},
-        title="バブルサイズ: 広告費 / 右上(★): 拡大対象 / 左下(✖): 停止検討"
-    )
-    # 4象限を分ける平均線を追加
-    fig_quadrant.add_vline(x=df_merged['Reading_Rate'].mean(), line_width=1, line_dash="dash", line_color="gray")
-    fig_quadrant.add_hline(y=df_merged['Actual_ROAS'].mean(), line_width=1, line_dash="dash", line_color="gray")
-    st.plotly_chart(fig_quadrant, use_container_width=True)
+if adj_file and int_file:
+    df_adj = pd.read_csv(adj_file)
+    df_int = pd.read_csv(int_file)
+    
+    try:
+        audit_df = run_growth_audit_piccoma(df_adj, df_int)
 
-    # --- SECTION 4: 要アクション・キャンペーン ---
-    st.subheader("🚨 要アクション・キャンペーン")
-    col_table1, col_table2 = st.columns(2)
+        # Summary Metrics
+        st.markdown("### Executive Summary")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("平均 Growth Score", f"{audit_df['growth_health_score'].mean():.1f}")
+        m2.metric("平均 測定信頼度", f"{audit_df['confidence_score'].mean():.1f}")
+        m3.metric("BM利用率 (Avg)", f"{audit_df['bm_usage_rate'].mean()*100:.1f}%")
+        m4.metric("分析対象件数", f"{len(audit_df)}件")
 
-    with col_table1:
-        st.markdown("**▼ 虚数疑い (乖離率ワースト5)**")
-        bad_disc = df_merged.sort_values(by="Discrepancy_Rate", ascending=False).head(5)
-        st.dataframe(bad_disc[['campaign_network', 'mmp_total_inflow', 'user_count', 'Discrepancy_Rate', 'cost']], hide_index=True)
+        # AI Comment
+        avg_g = audit_df['growth_health_score'].mean()
+        avg_c = audit_df['confidence_score'].mean()
+        st.info(f"""
+        💡 **[AIによる分析コメント]**
+        現在のキャンペーン全体の健全性は **{score_category(avg_g)}** 判定です。
+        測定信頼度が **{avg_c:.1f}** となっているため、iOSなどの推計データを含む意思決定には注意が必要です。
+        特にBM貢献度が高い上位キャンペーンへの予算シフトを推奨します。
+        """)
 
-    with col_table2:
-        st.markdown("**▼ 赤字警告 (ROASワースト5)**")
-        bad_roas = df_merged[df_merged['cost'] > 10000].sort_values(by="Actual_ROAS", ascending=True).head(5)
-        st.dataframe(bad_roas[['campaign_network', 'cost', 'r_sales', 'Actual_ROAS', 'Reading_Rate']], hide_index=True)
+        # Scatter Chart
+        st.markdown("### Campaign Positioning Matrix")
+        scatter = alt.Chart(audit_df).mark_circle(size=150).encode(
+            x=alt.X("growth_health_score:Q", title="Growth Health Score (BM貢献度)"),
+            y=alt.Y("confidence_score:Q", title="Measurement Confidence Score (信頼度)"),
+            color=alt.Color("growth_category:N", title="判定カテゴリ"),
+            tooltip=["campaign_network", "channel", "growth_health_score", "confidence_score", "bm_usage_rate"]
+        ).properties(height=450).interactive()
+        st.altair_chart(scatter, use_container_width=True)
 
+        # Styled Table
+        st.markdown("### Campaign Detail Analysis")
+        
+        def style_scores(val):
+            if isinstance(val, (int, float)) and val < 60:
+                return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444; font-weight: bold;"
+            return ""
+
+        view_cols = [
+            "campaign_network", "channel", "cost", "growth_health_score", 
+            "confidence_score", "bm_score", "activation_score", "payback_score", "growth_category"
+        ]
+        
+        styled_df = audit_df[view_cols].style.applymap(style_scores, subset=["growth_health_score", "confidence_score", "bm_score"])
+        st.dataframe(styled_df, use_container_width=True, height=500)
+
+    except Exception as e:
+        st.error(f"分析中にエラーが発生しました: {e}")
 else:
-    st.info("サイドバーからAdjustと社内システムのCSVファイルをアップロードしてください。")
+    st.warning("左側のサイドバーからAdjustデータと社内データの両方をアップ로드してください。")
