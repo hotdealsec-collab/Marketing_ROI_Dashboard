@@ -151,13 +151,26 @@ if adj_file and int_file:
         if sel_cp != "All": f_df = f_df[f_df['campaign_network'] == sel_cp]
         if sel_ct != "All": f_df = f_df[f_df['growth_category'] == sel_ct]
 
+      # Positioning Chart
         st.markdown("### Campaign Positioning")
-        scatter = alt.Chart(f_df).mark_circle(size=140).encode(
-            x=alt.X("growth_health_score:Q", title="Growth Health"),
-            y=alt.Y("confidence_score:Q", title="Confidence"),
+        
+        # 겹치는 캠페인들을 분산시키기 위해 차트용 데이터프레임 복사 및 Jitter(노이즈) 추가
+        f_df_plot = f_df.copy()
+        
+        # 실제 데이터가 겹치지 않도록 X, Y 좌표에 -1.0 ~ +1.0 사이의 랜덤 값을 미세하게 추가
+        np.random.seed(42) # 새로고침 시에도 점들이 너무 심하게 튀지 않도록 시드 고정
+        f_df_plot["plot_x"] = f_df_plot["growth_health_score"] + np.random.uniform(-1.0, 1.0, len(f_df_plot))
+        f_df_plot["plot_y"] = f_df_plot["confidence_score"] + np.random.uniform(-1.0, 1.0, len(f_df_plot))
+
+        # 투명도(opacity=0.7)를 추가하여 점이 겹쳐있을 때 더 진하게 보이도록 개선
+        scatter = alt.Chart(f_df_plot).mark_circle(size=140, opacity=0.7).encode(
+            x=alt.X("plot_x:Q", title="Growth Health Score", scale=alt.Scale(zero=False)),
+            y=alt.Y("plot_y:Q", title="Confidence", scale=alt.Scale(zero=False)),
             color=alt.Color("growth_category:N", title="Category"),
-            tooltip=["campaign_network", "growth_health_score", "growth_category"]
+            # 마우스를 올렸을 때 보여지는 툴팁에는 Jitter 값이 아닌 "실제 점수"가 나오도록 설정
+            tooltip=["campaign_network", "growth_health_score", "confidence_score", "growth_category"]
         ).properties(height=400).interactive()
+        
         st.altair_chart(scatter, use_container_width=True)
 
         st.markdown("### Campaign Table")
