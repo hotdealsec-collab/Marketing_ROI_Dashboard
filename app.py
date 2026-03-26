@@ -36,7 +36,6 @@ def score_category(score):
 # --------------------------------------------------
 # 3. データ処理エンジン (完全一致 & 重複排除)
 # --------------------------------------------------
-# weights 파라미터를 추가로 받습니다.
 def run_growth_audit(df_adj, df_int, weights):
     # --- 1. 外部データ(Adjust)のクレンジングと集計 ---
     df_adj = df_adj.dropna(subset=['campaign_network']).copy()
@@ -91,7 +90,6 @@ def run_growth_audit(df_adj, df_int, weights):
         lambda x: 0 if x["cost"] == 0 else (50 if pd.isna(x["payback"]) else (100 if x["payback"] <= 1.2 else (60 if x["payback"] <= 2.5 else 20))), axis=1
     )
 
-    # 파라미터로 받은 가중치를 퍼센트 단위로 계산에 적용합니다.
     df["growth_health_score"] = (
         df["s_traffic"] * (weights['traffic'] / 100) + 
         df["s_activation"] * (weights['activation'] / 100) + 
@@ -119,17 +117,16 @@ st.sidebar.markdown("---")
 st.sidebar.header("2. Weight Settings (%)")
 st.sidebar.markdown("<div class='small-note'>各指標の重みを調整できます（合計100%推奨）</div>", unsafe_allow_html=True)
 
-# 슬라이더를 추가하여 사용자가 화면에서 가중치를 설정할 수 있게 합니다.
-w_traffic = st.sidebar.slider("Traffic (CPI)", min_value=0, max_value=100, value=10, step=5)
-w_activation = st.sidebar.slider("Activation", min_value=0, max_value=100, value=15, step=5)
-w_intensity = st.sidebar.slider("Intensity", min_value=0, max_value=100, value=15, step=5)
-w_retention = st.sidebar.slider("Retention", min_value=0, max_value=100, value=20, step=5)
-w_bm = st.sidebar.slider("BM Contribution", min_value=0, max_value=100, value=25, step=5)
-w_payback = st.sidebar.slider("Payback", min_value=0, max_value=100, value=15, step=5)
+# 슬라이더 제목에 일본어 설명을 추가하고, 마우스를 올리면 보이는 tooltip(help)도 추가했습니다.
+w_traffic = st.sidebar.slider("Traffic (CPI効率)", min_value=0, max_value=100, value=10, step=5, help="インストールあたりの獲得コスト効率（CPI）を評価します。")
+w_activation = st.sidebar.slider("Activation (作品閲覧転換率)", min_value=0, max_value=100, value=15, step=5, help="インストール後、実際に作品を閲覧したユーザーの割合です。")
+w_intensity = st.sidebar.slider("Intensity (平均閲覧作品数)", min_value=0, max_value=100, value=15, step=5, help="1ユーザーあたりの平均閲覧作品数で、エンゲージメントの深さを測ります。")
+w_retention = st.sidebar.slider("Retention (D7維持率)", min_value=0, max_value=100, value=20, step=5, help="インストールから7日後もアプリを利用しているユーザーの割合です。")
+w_bm = st.sidebar.slider("BM Contribution (BM利用率)", min_value=0, max_value=100, value=25, step=5, help="ビジネスモデル（課金など）に貢献したユーザーの割合です。")
+w_payback = st.sidebar.slider("Payback (投資回収効率)", min_value=0, max_value=100, value=15, step=5, help="投下した広告費に対する売上の回収効率（ROAS等）を評価します。")
 
 total_weight = w_traffic + w_activation + w_intensity + w_retention + w_bm + w_payback
 
-# 가중치 합이 100%가 아니면 사용자에게 경고 메시지를 보여줍니다.
 if total_weight != 100:
     st.sidebar.warning(f"⚠️ 現在の合計は {total_weight}% です。正確な評価のため 100% に合わせてください。")
 else:
@@ -145,7 +142,6 @@ weights_dict = {
 }
 
 if adj_file and int_file:
-    # 딕셔너리로 묶은 가중치 정보를 함수에 전달합니다.
     audit_df = run_growth_audit(pd.read_csv(adj_file), pd.read_csv(int_file), weights_dict)
 
     if audit_df.empty:
