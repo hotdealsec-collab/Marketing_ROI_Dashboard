@@ -9,11 +9,11 @@ import re
 # --------------------------------------------------
 st.set_page_config(page_title="Piccoma Growth Audit Pro", layout="wide")
 
+# Overview 렌더링 오류를 유발했던 .stMetric 관련 CSS를 삭제했습니다.
 st.markdown("""
 <style>
 .block-container { padding-top: 1.5rem; }
 .small-note { color: #6b7280; font-size: 0.9rem; }
-.stMetric { background-color: #f8fafc; padding: 15px; border-radius: 12px; border: 1px solid #e2e8f0; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -87,7 +87,7 @@ def run_growth_audit(df_adj, df_int):
     df["s_retention"] = df["retention_d7"].apply(lambda x: 50 if pd.isna(x) else (100 if x >= 0.25 else (60 if x >= 0.15 else 30)))
     df["s_bm"] = df["bm_rate"].apply(lambda x: "不明" if pd.isna(x) or pd.isna(avg_bm) else ("良好" if x >= avg_bm*1.15 else ("普通" if x >= avg_bm*0.85 else "注意"))).map(map_score)
     
-    # cost가 0인 경우 s_payback을 0으로 처리, 그 외의 경우 기존 로직 적용
+    # cost가 0인 경우 s_payback을 0으로 처리
     df["s_payback"] = df.apply(
         lambda x: 0 if x["cost"] == 0 else (
             50 if pd.isna(x["payback"]) else (100 if x["payback"] <= 1.2 else (60 if x["payback"] <= 2.5 else 20))
@@ -127,16 +127,7 @@ if adj_file and int_file:
     if audit_df.empty:
         st.error("❌ キャンペーンの一致が確認できませんでした。Adjustの'campaign_network'と社内データの'campaign_name'を確認してください。")
     else:
-        st.markdown("### Overview")
-        k1, k2, k3 = st.columns(3)
-        
-        mean_score = audit_df['growth_health_score'].mean()
-        mean_conf = audit_df['confidence_score'].mean()
-        
-        k1.metric("Average Growth Score", f"{mean_score:.1f}" if pd.notna(mean_score) else "N/A")
-        k2.metric("Average Confidence", f"{mean_conf:.1f}" if pd.notna(mean_conf) else "N/A")
-        k3.metric("Campaigns (Unique)", len(audit_df))
-
+        # --- Filters (필터를 먼저 배치해야 Overview를 필터링된 데이터 기준으로 계산 가능) ---
         st.markdown("### Filters")
         f1, f2, f3, f4 = st.columns(4)
         
@@ -151,33 +142,46 @@ if adj_file and int_file:
         if sel_cp != "All": f_df = f_df[f_df['campaign_network'] == sel_cp]
         if sel_ct != "All": f_df = f_df[f_df['growth_category'] == sel_ct]
 
-      # Positioning Chart
+        # --- Overview (필터링된 데이터인 f_df를 기준으로 평균 점수 계산) ---
+        st.markdown("### Overview")
+        k1, k2, k3 = st.columns(3)
+        
+        if len(f_df) > 0:
+            mean_score = f_df['growth_health_score'].mean()
+            mean_conf = f_df['confidence_score'].mean()
+            
+            k1.metric("Average Growth Score", f"{mean_score:.1f}" if pd.notna(mean_score) else "N/A")
+            k2.metric("Average Confidence", f"{mean_conf:.1f}" if pd.notna(mean_conf) else "N/A")
+            k3.metric("Campaigns (Unique)", len(f_df))
+        else:
+            k1.metric("Average Growth Score", "N/A")
+            k2.metric("Average Confidence", "N/A")
+            k3.metric("Campaigns (Unique)", 0)
+
+        # --- Positioning Chart ---
         st.markdown("### Campaign Positioning")
         
-        # 겹치는 캠페인들을 분산시키기 위해 차트용 데이터프레임 복사 및 Jitter(노이즈) 추가
         f_df_plot = f_df.copy()
         
-        # 실제 데이터가 겹치지 않도록 X, Y 좌표에 -1.0 ~ +1.0 사이의 랜덤 값을 미세하게 추가
-        np.random.seed(42) # 새로고침 시에도 점들이 너무 심하게 튀지 않도록 시드 고정
+        # 실제 데이터가 겹치지 않도록 Jitter(노이즈) 추가
+        np.random.seed(42) 
         f_df_plot["plot_x"] = f_df_plot["growth_health_score"] + np.random.uniform(-1.0, 1.0, len(f_df_plot))
         f_df_plot["plot_y"] = f_df_plot["confidence_score"] + np.random.uniform(-1.0, 1.0, len(f_df_plot))
 
-        # 투명도(opacity=0.7)를 추가하여 점이 겹쳐있을 때 더 진하게 보이도록 개선
         scatter = alt.Chart(f_df_plot).mark_circle(size=140, opacity=0.7).encode(
             x=alt.X("plot_x:Q", title="Growth Health Score", scale=alt.Scale(zero=False)),
             y=alt.Y("plot_y:Q", title="Confidence", scale=alt.Scale(zero=False)),
             color=alt.Color("growth_category:N", title="Category"),
-            # 마우스를 올렸을 때 보여지는 툴팁에는 Jitter 값이 아닌 "실제 점수"가 나오도록 설정
             tooltip=["campaign_network", "growth_health_score", "confidence_score", "growth_category"]
         ).properties(height=400).interactive()
         
         st.altair_chart(scatter, use_container_width=True)
 
+        # --- Campaign Table ---
         st.markdown("### Campaign Table")
         def style_red(val):
             return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
         
-        # 테이블 컬럼에서 s_ 항목들을 모두 제외하고 실제 수치 데이터만 표시
         display_cols = [
             "campaign_network", "channel", "os_name", 
             "growth_category", "growth_health_score", "confidence_score",
