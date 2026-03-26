@@ -5,21 +5,21 @@ import altair as alt
 from rapidfuzz import process
 
 # --------------------------------------------------
-# ページ設定 (페이지 설정)
+# 1. ページ設定 & スタイル (페이지 설정 & 스타일)
 # --------------------------------------------------
-st.set_page_config(page_title="Piccoma Growth Audit Pro", layout="wide")
+st.set_page_config(page_title="Campaign Health Check", layout="wide")
 
-# 스타일 설정
 st.markdown("""
 <style>
-.block-container { padding-top: 1.8rem; }
+.block-container { padding-top: 1.5rem; }
 .small-note { color: #6b7280; font-size: 0.9rem; }
-.stMetric { background-color: #f8fafc; padding: 15px; border-radius: 10px; border: 1px solid #e2e8f0; }
+.stMetric { background-color: #f8fafc; padding: 15px; border-radius: 12px; border: 1px solid #e2e8f0; }
+.section-header { margin-top: 1.5rem; margin-bottom: 1rem; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
 # --------------------------------------------------
-# ロジック関数 (로직 함수)
+# 2. ロジック関数 (로직 함수)
 # --------------------------------------------------
 def safe_divide(a, b):
     return a / b if (pd.notna(a) and pd.notna(b) and b != 0) else np.nan
@@ -35,9 +35,9 @@ def score_category(score):
     return "要確認 (Critical)"
 
 # --------------------------------------------------
-# データ処理エンジン (데이터 처리 엔진)
+# 3. データ処理エンジン (데이터 처리 엔진)
 # --------------------------------------------------
-def run_growth_audit_pro(df_adj, df_int):
+def run_growth_audit(df_adj, df_int):
     # キャンペーン名マッチング (Fuzzy Matching)
     df_int['campaign_clean'] = df_int['campaign_name'].str.split(' \(').str[0].str.strip()
     adj_campaigns = df_adj['campaign_network'].unique().tolist()
@@ -49,7 +49,7 @@ def run_growth_audit_pro(df_adj, df_int):
     df_int['matched_campaign'] = df_int['campaign_clean'].apply(find_match)
     df = pd.merge(df_adj, df_int, left_on='campaign_network', right_on='matched_campaign', how='inner')
     
-    # 指標計算 (6つの重要指標)
+    # 指標計算 (6要素)
     df["cpi"] = df.apply(lambda x: safe_divide(x["cost"], x["installs"]), axis=1)
     df["activation_rate"] = df.apply(lambda x: safe_divide(x["ru_count"], x["user_count"]), axis=1)
     df["reading_intensity"] = df.apply(lambda x: safe_divide(x["product_count"], x["ru_count"]), axis=1)
@@ -57,10 +57,7 @@ def run_growth_audit_pro(df_adj, df_int):
     df["bm_usage_rate"] = df.apply(lambda x: safe_divide(x["bm_user_count"], x["user_count"]), axis=1)
     df["payback_ratio"] = df.apply(lambda x: safe_divide(x["cost"], x["r_sales"]), axis=1)
 
-    # 平均値の算出 (相対評価用)
-    avg_cpi = df["cpi"].mean()
-    avg_intensity = df["reading_intensity"].mean()
-    avg_bm = df["bm_usage_rate"].mean()
+    avg_cpi = df["cpi"].mean(); avg_intensity = df["reading_intensity"].mean(); avg_bm = df["bm_usage_rate"].mean()
 
     # スコアリング
     df["s_traffic"] = df["cpi"].apply(lambda x: "良好" if x <= avg_cpi*0.85 else ("普通" if x <= avg_cpi*1.15 else "注意")).map(map_score)
@@ -70,105 +67,82 @@ def run_growth_audit_pro(df_adj, df_int):
     df["s_bm"] = df["bm_usage_rate"].apply(lambda x: "良好" if x >= avg_bm*1.15 else ("普通" if x >= avg_bm*0.85 else "注意")).map(map_score)
     df["s_payback"] = df["payback_ratio"].apply(lambda x: "良好" if x <= 1.2 else ("普通" if x <= 2.5 else "リスクあり")).map(map_score)
 
-    # 総合スコア (加重平均)
-    df["growth_health_score"] = (
-        df["s_traffic"] * 0.10 +
-        df["s_activation"] * 0.15 +
-        df["s_intensity"] * 0.15 +
-        df["s_retention"] * 0.20 +
-        df["s_bm"] * 0.25 +
-        df["s_payback"] * 0.15
-    ).round(1)
-    
+    df["growth_health_score"] = (df["s_traffic"]*0.1 + df["s_activation"]*0.15 + df["s_intensity"]*0.15 + df["s_retention"]*0.2 + df["s_bm"]*0.25 + df["s_payback"]*0.15).round(1)
     df["growth_category"] = df["growth_health_score"].apply(score_category)
-
-    # 測定信頼度
-    def calc_confidence(row):
-        score = 100
-        if row["cost"] == 0: score -= 50
-        if str(row["os_name"]).lower() == "ios": score -= 15
-        return max(score, 0)
-    df["confidence_score"] = df.apply(calc_confidence, axis=1)
+    
+    # 信頼度スコア
+    df["confidence_score"] = df.apply(lambda x: max(100 - (50 if x["cost"]==0 else 0) - (15 if str(x["os_name"]).lower()=="ios" else 0), 0), axis=1)
     
     return df
 
 # --------------------------------------------------
-# UI 構築 (UI 구축)
+# 4. メイン画面の構築 (메인 화면 구축)
 # --------------------------------------------------
-st.title("🚀 Piccoma Growth Health Audit")
-st.markdown("<p class='small-note'>外部獲得データと内部行動データを統合し、6つの指標からキャンペーンの真価を判定します。</p>", unsafe_allow_html=True)
+st.title("Campaign Health Check")
+st.markdown("<p class='small-note'>Performance × Measurement Confidence</p>", unsafe_allow_html=True)
 
-# --- サイドバー (사이드바) ---
-st.sidebar.header("📁 データアップロード")
-adj_file = st.sidebar.file_uploader("Adjust (外部)", type="csv")
-int_file = st.sidebar.file_uploader("Internal SQL (内部)", type="csv")
+# サイドバー: ファイルアップロード
+st.sidebar.header("Upload")
+adj_file = st.sidebar.file_uploader("Adjust CSV (External)", type="csv")
+int_file = st.sidebar.file_uploader("Internal SQL CSV (Internal)", type="csv")
 
-# 사이드바 하단에 그로스 스코어 산출 근거 추가
+# 사이드바 하단 도움말
 st.sidebar.markdown("---")
 with st.sidebar.expander("ℹ️ Growth Scoreの算出根拠", expanded=False):
-    st.markdown("""
-    各キャンペーンの総合スコアは、以下の6つの指標に基づき重み付け計算されています。
-    
-    1. **Traffic (10%)**
-       - CPIの効率性を評価。
-    2. **Activation (15%)**
-       - 流入ユーザーの作品閲覧転換率。
-    3. **Intensity (15%)**
-       - 1人当たりの平均閲覧作品数。
-    4. **Retention (20%)**
-       - 閲覧ユーザーの7日後定着率(D7/RU)。
-    5. **BM Contribution (25%)**
-       - 待てば無料等のBM利用率。
-    6. **Payback (15%)**
-       - 広告費に対する売上回収効率。
-    """)
+    st.write("Traffic(10%), Activation(15%), Intensity(15%), Retention(20%), BM Contribution(25%), Payback(15%)")
 
 if adj_file and int_file:
-    # 데이터 처리 및 분석
-    audit_df = run_growth_audit_pro(pd.read_csv(adj_file), pd.read_csv(int_file))
+    # データ処理
+    raw_adj = pd.read_csv(adj_file)
+    raw_int = pd.read_csv(int_file)
+    audit_df = run_growth_audit(raw_adj, raw_int)
 
-    # 필터 기능
-    st.sidebar.header("🔍 フィルター")
-    selected_channel = st.sidebar.multiselect("媒体 (Channel)", audit_df['channel'].unique(), default=audit_df['channel'].unique())
-    selected_os = st.sidebar.multiselect("OS", audit_df['os_name'].unique(), default=audit_df['os_name'].unique())
+    # --- Overview KPI ---
+    st.markdown("### Overview")
+    k1, k2, k3 = st.columns(3)
+    k1.metric("Average Growth Score", f"{audit_df['growth_health_score'].mean():.1f}")
+    k2.metric("Average Confidence", f"{audit_df['confidence_score'].mean():.1f}")
+    k3.metric("Campaigns", len(audit_df))
+
+    # --- Filters (메인 화면 배치) ---
+    st.markdown("### Filters")
+    f1, f2, f3, f4 = st.columns(4)
     
-    filtered_df = audit_df[(audit_df['channel'].isin(selected_channel)) & (audit_df['os_name'].isin(selected_os))]
+    # 필터 옵션 추출
+    channel_list = ["All"] + sorted(audit_df['channel'].unique().tolist())
+    os_list = ["All"] + sorted(audit_df['os_name'].unique().tolist())
+    campaign_list = ["All"] + sorted(audit_df['campaign_network'].unique().tolist())
+    category_list = ["All"] + sorted(audit_df['growth_category'].unique().tolist())
 
-    if not filtered_df.empty:
-        # KPI サマリー
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Avg Growth Score", f"{filtered_df['growth_health_score'].mean():.1f}")
-        m2.metric("Avg Intensity", f"{filtered_df['reading_intensity'].mean():.2f}")
-        m3.metric("Avg D7 Retention", f"{filtered_df['retention_d7_rate'].mean()*100:.1f}%")
-        m4.metric("BM Usage Rate", f"{filtered_df['bm_usage_rate'].mean()*100:.1f}%")
+    sel_channel = f1.selectbox("Channel", channel_list)
+    sel_os = f2.selectbox("OS", os_list)
+    sel_campaign = f3.selectbox("Campaign", campaign_list)
+    sel_category = f4.selectbox("Growth Category", category_list)
 
-        st.divider()
+    # 필터링 적용
+    filtered_df = audit_df.copy()
+    if sel_channel != "All": filtered_df = filtered_df[filtered_df['channel'] == sel_channel]
+    if sel_os != "All": filtered_df = filtered_df[filtered_df['os_name'] == sel_os]
+    if sel_campaign != "All": filtered_df = filtered_df[filtered_df['campaign_network'] == sel_campaign]
+    if sel_category != "All": filtered_df = filtered_df[filtered_df['growth_category'] == sel_category]
 
-        # 시각화 및 테이블 (이전 코드와 동일)
-        c1, c2 = st.columns([1.5, 1])
-        with c1:
-            st.subheader("📍 健全性マトリクス")
-            scatter = alt.Chart(filtered_df).mark_circle(size=180).encode(
-                x=alt.X("growth_health_score:Q", title="Growth Health (質)"),
-                y=alt.Y("confidence_score:Q", title="Measurement Confidence (信頼)"),
-                color=alt.Color("growth_category:N", scale=alt.Scale(domain=['健全 (Healthy)', '観察 (Monitor)', '注意 (Warning)', '要確認 (Critical)'], range=['#10b981', '#3b82f6', '#f59e0b', '#ef4444'])),
-                tooltip=["campaign_network", "growth_health_score", "reading_intensity", "bm_usage_rate"]
-            ).properties(height=450).interactive()
-            st.altair_chart(scatter, use_container_width=True)
-        
-        with c2:
-            st.subheader("📊 重要指標スコア比較")
-            summary_data = filtered_df.groupby('channel')[['s_intensity', 's_retention', 's_bm']].mean().reset_index()
-            st.dataframe(summary_data.style.background_gradient(cmap='Blues'), use_container_width=True)
+    # --- Visuals ---
+    st.markdown("### Campaign Positioning")
+    scatter = alt.Chart(filtered_df).mark_circle(size=140).encode(
+        x=alt.X("growth_health_score:Q", title="Growth Health Score"),
+        y=alt.Y("confidence_score:Q", title="Measurement Confidence Score"),
+        color=alt.Color("growth_category:N", title="Category"),
+        tooltip=["campaign_network", "channel", "growth_health_score", "confidence_score"]
+    ).properties(height=420).interactive()
+    st.altair_chart(scatter, use_container_width=True)
 
-        st.subheader("📋 キャンペーン診断詳細")
-        def highlight_low(val):
-            return "color: #ef4444; font-weight: bold;" if isinstance(val, (int, float)) and val < 60 else ""
-        
-        display_cols = ["campaign_network", "growth_health_score", "s_traffic", "s_activation", "s_intensity", "s_retention", "s_bm", "s_payback"]
-        st.dataframe(filtered_df[display_cols].style.applymap(highlight_low), use_container_width=True)
-    else:
-        st.warning("フィルター条件に一致するデータがありません。")
+    # --- Table ---
+    st.markdown("### Campaign Table")
+    def highlight_low(val):
+        return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
+
+    display_cols = ["channel", "campaign_network", "os_name", "growth_health_score", "confidence_score", "growth_category"]
+    st.dataframe(filtered_df[display_cols].style.applymap(highlight_low, subset=["growth_health_score", "confidence_score"]), use_container_width=True, height=500)
 
 else:
-    st.info("サイドバーからAdjustデータと社内データをアップロードしてください。")
+    st.info("CSVファイルをアップロードしてください。")
