@@ -38,22 +38,26 @@ def score_category(score):
 # 3. データ処理エンジン (完全一致 & 重複排除)
 # --------------------------------------------------
 def run_growth_audit(df_adj, df_int):
-    # --- 1. 外部データ(Adjust)の集計 ---
+    # --- 1. 外部データ(Adjust)のクレンジングと集計 ---
+    # 빈 값 제거 및 앞뒤 공백 제거 (캠페인 중복 표시의 핵심 원인 해결)
+    df_adj = df_adj.dropna(subset=['campaign_network']).copy()
+    df_adj['campaign_network'] = df_adj['campaign_network'].astype(str).str.strip()
+    
     # 同一キャンペーンが複数行にある場合を合算し、1キャンペーン1行にする
     adj_grouped = df_adj.groupby('campaign_network').agg({
         'cost': 'sum',
         'installs': 'sum',
         'all_revenue': 'sum',
-        'channel': lambda x: ', '.join(x.unique().astype(str)),
-        'os_name': lambda x: ', '.join(x.unique().astype(str))
+        'channel': lambda x: ', '.join(x.dropna().unique().astype(str)),
+        'os_name': lambda x: ', '.join(x.dropna().unique().astype(str))
     }).reset_index()
 
     # --- 2. 内部データのクレンジングと集計 ---
-    df_int = df_int.copy().dropna(subset=['campaign_name'])
+    df_int = df_int.dropna(subset=['campaign_name']).copy()
     
-    # 括弧とその中のID（例: " (21944452275)"）を削除して完全一致用の名前を作成
+    # 괄호와 숫자(예: "(21944452275)")를 제거. 괄호 뒤에 공백이 있어도 처리되도록 정규식 개선
     def clean_campaign_name(name):
-        return re.sub(r'\s*\(\d+\)$', '', str(name)).strip()
+        return re.sub(r'\s*\(\d+\)\s*$', '', str(name)).strip()
 
     df_int['campaign_name_clean'] = df_int['campaign_name'].apply(clean_campaign_name)
     
@@ -63,9 +67,9 @@ def run_growth_audit(df_adj, df_int):
         'd7_count': 'sum', 'product_count': 'sum', 'bm_user_count': 'sum', 'r_sales': 'sum'
     }).reset_index()
 
-    # --- 3. 完全一致(Exact Match)での結合 ---
-    # Adjustのキャンペーン名と、クレンジング後の社内キャンペーン名を紐付け
-    df = pd.merge(adj_grouped, int_grouped, left_on='campaign_network', right_on='campaign_name_clean', how='inner')
+    # --- 3. 結合 (Adjust基準 Left Join) ---
+    # Adjust를 기준으로 하므로 how='left'를 사용. (내부 DB에 아직 데이터가 없어도 Adjust 기준으론 보여야 함)
+    df = pd.merge(adj_grouped, int_grouped, left_on='campaign_network', right_on='campaign_name_clean', how='left')
     
     if df.empty: return df
 
@@ -77,15 +81,17 @@ def run_growth_audit(df_adj, df_int):
     df["bm_rate"] = df.apply(lambda x: safe_divide(x["bm_user_count"], x["user_count"]), axis=1)
     df["payback"] = df.apply(lambda x: safe_divide(x["cost"], x["r_sales"]), axis=1)
 
-    avg_cpi = df["cpi"].mean(); avg_int = df["intensity"].mean(); avg_bm = df["bm_rate"].mean()
+    avg_cpi = df["cpi"].mean()
+    avg_int = df["intensity"].mean()
+    avg_bm = df["bm_rate"].mean()
 
-    # スコア化
-    df["s_traffic"] = df["cpi"].apply(lambda x: "良好" if x <= avg_cpi*0.85 else ("普通" if x <= avg_cpi*1.15 else "注意")).map(map_score)
-    df["s_activation"] = df["activation"].apply(lambda x: 100 if x >= 0.7 else (60 if x >= 0.5 else 30))
-    df["s_intensity"] = df["intensity"].apply(lambda x: "良好" if x >= avg_int*1.15 else ("普通" if x >= avg_int*0.85 else "注意")).map(map_score)
-    df["s_retention"] = df["retention_d7"].apply(lambda x: 100 if x >= 0.25 else (60 if x >= 0.15 else 30))
-    df["s_bm"] = df["bm_rate"].apply(lambda x: "良好" if x >= avg_bm*1.15 else ("普通" if x >= avg_bm*0.85 else "注意")).map(map_score)
-    df["s_payback"] = df["payback"].apply(lambda x: 100 if x <= 1.2 else (60 if x <= 2.5 else 20))
+    # NaN(내부 데이터가 아직 없는 캠페인)인 경우 점수를 깎지 않고 50점(不明/보통) 처리하도록 예외 로직 추가
+    df["s_traffic"] = df["cpi"].apply(lambda x: "不明" if pd.isna(x) or pd.isna(avg_cpi) else ("良好" if x <= avg_cpi*0.85 else ("普通" if x <= avg_cpi*1.15 else "注意"))).map(map_score)
+    df["s_activation"] = df["activation"].apply(lambda x: 50 if pd.isna(x) else (100 if x >= 0.7 else (60 if x >= 0.5 else 30)))
+    df["s_intensity"] = df["intensity"].apply(lambda x: "不明" if pd.isna(x) or pd.isna(avg_int) else ("良好" if x >= avg_int*1.15 else ("普通" if x >= avg_int*0.85 else "注意"))).map(map_score)
+    df["s_retention"] = df["retention_d7"].apply(lambda x: 50 if pd.isna(x) else (100 if x >= 0.25 else (60 if x >= 0.15 else 30)))
+    df["s_bm"] = df["bm_rate"].apply(lambda x: "不明" if pd.isna(x) or pd.isna(avg_bm) else ("良好" if x >= avg_bm*1.15 else ("普通" if x >= avg_bm*0.85 else "注意"))).map(map_score)
+    df["s_payback"] = df["payback"].apply(lambda x: 50 if pd.isna(x) else (100 if x <= 1.2 else (60 if x <= 2.5 else 20)))
 
     df["growth_health_score"] = (df["s_traffic"]*0.1 + df["s_activation"]*0.15 + df["s_intensity"]*0.15 + df["s_retention"]*0.2 + df["s_bm"]*0.25 + df["s_payback"]*0.15).round(1)
     df["growth_category"] = df["growth_health_score"].apply(score_category)
@@ -98,7 +104,6 @@ def run_growth_audit(df_adj, df_int):
 # --------------------------------------------------
 st.title("Campaign Health Check")
 
-# サイドバー: アップロード & 算出根拠
 st.sidebar.header("Upload")
 adj_file = st.sidebar.file_uploader("Adjust CSV", type="csv")
 int_file = st.sidebar.file_uploader("Internal SQL CSV", type="csv")
@@ -121,30 +126,32 @@ if adj_file and int_file:
     if audit_df.empty:
         st.error("❌ キャンペーンの一致が確認できませんでした。Adjustの'campaign_network'と社内データの'campaign_name'を確認してください。")
     else:
-        # Overview
         st.markdown("### Overview")
         k1, k2, k3 = st.columns(3)
-        k1.metric("Average Growth Score", f"{audit_df['growth_health_score'].mean():.1f}")
-        k2.metric("Average Confidence", f"{audit_df['confidence_score'].mean():.1f}")
+        
+        # NaN 에러 방지 (값이 NaN일 때 화면 렌더링이 깨지는 현상 방지)
+        mean_score = audit_df['growth_health_score'].mean()
+        mean_conf = audit_df['confidence_score'].mean()
+        
+        k1.metric("Average Growth Score", f"{mean_score:.1f}" if pd.notna(mean_score) else "N/A")
+        k2.metric("Average Confidence", f"{mean_conf:.1f}" if pd.notna(mean_conf) else "N/A")
         k3.metric("Campaigns (Unique)", len(audit_df))
 
-        # --- Filters (メイン画面に直接配置) ---
         st.markdown("### Filters")
         f1, f2, f3, f4 = st.columns(4)
         
-        sel_ch = f1.selectbox("Channel", ["All"] + sorted(audit_df['channel'].unique().tolist()))
-        sel_os = f2.selectbox("OS", ["All"] + sorted(audit_df['os_name'].unique().tolist()))
-        sel_cp = f3.selectbox("Campaign", ["All"] + sorted(audit_df['campaign_network'].unique().tolist()))
-        sel_ct = f4.selectbox("Growth Category", ["All"] + sorted(audit_df['growth_category'].unique().tolist()))
+        sel_ch = f1.selectbox("Channel", ["All"] + sorted(audit_df['channel'].dropna().unique().tolist()))
+        sel_os = f2.selectbox("OS", ["All"] + sorted(audit_df['os_name'].dropna().unique().tolist()))
+        sel_cp = f3.selectbox("Campaign", ["All"] + sorted(audit_df['campaign_network'].dropna().unique().tolist()))
+        sel_ct = f4.selectbox("Growth Category", ["All"] + sorted(audit_df['growth_category'].dropna().unique().tolist()))
 
-        # フィルタリング適用
+        # 다중 채널/OS를 대비해 contains 로직으로 필터링 강화
         f_df = audit_df.copy()
-        if sel_ch != "All": f_df = f_df[f_df['channel'] == sel_ch]
-        if sel_os != "All": f_df = f_df[f_df['os_name'] == sel_os]
+        if sel_ch != "All": f_df = f_df[f_df['channel'].str.contains(sel_ch, na=False)]
+        if sel_os != "All": f_df = f_df[f_df['os_name'].str.contains(sel_os, na=False)]
         if sel_cp != "All": f_df = f_df[f_df['campaign_network'] == sel_cp]
         if sel_ct != "All": f_df = f_df[f_df['growth_category'] == sel_ct]
 
-        # Positioning Chart
         st.markdown("### Campaign Positioning")
         scatter = alt.Chart(f_df).mark_circle(size=140).encode(
             x=alt.X("growth_health_score:Q", title="Growth Health"),
@@ -154,7 +161,6 @@ if adj_file and int_file:
         ).properties(height=400).interactive()
         st.altair_chart(scatter, use_container_width=True)
 
-        # Campaign Table
         st.markdown("### Campaign Table")
         def style_red(val):
             return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
