@@ -39,11 +39,9 @@ def score_category(score):
 # --------------------------------------------------
 def run_growth_audit(df_adj, df_int):
     # --- 1. 外部データ(Adjust)のクレンジングと集計 ---
-    # 빈 값 제거 및 앞뒤 공백 제거 (캠페인 중복 표시의 핵심 원인 해결)
     df_adj = df_adj.dropna(subset=['campaign_network']).copy()
     df_adj['campaign_network'] = df_adj['campaign_network'].astype(str).str.strip()
     
-    # 同一キャンペーンが複数行にある場合を合算し、1キャンペーン1行にする
     adj_grouped = df_adj.groupby('campaign_network').agg({
         'cost': 'sum',
         'installs': 'sum',
@@ -55,20 +53,17 @@ def run_growth_audit(df_adj, df_int):
     # --- 2. 内部データのクレンジングと集計 ---
     df_int = df_int.dropna(subset=['campaign_name']).copy()
     
-    # 괄호와 숫자(예: "(21944452275)")를 제거. 괄호 뒤에 공백이 있어도 처리되도록 정규식 개선
     def clean_campaign_name(name):
         return re.sub(r'\s*\(\d+\)\s*$', '', str(name)).strip()
 
     df_int['campaign_name_clean'] = df_int['campaign_name'].apply(clean_campaign_name)
     
-    # 同一名になったキャンペーンの指標を合算
     int_grouped = df_int.groupby('campaign_name_clean').agg({
         'user_count': 'sum', 'ru_count': 'sum', 'd1_count': 'sum',
         'd7_count': 'sum', 'product_count': 'sum', 'bm_user_count': 'sum', 'r_sales': 'sum'
     }).reset_index()
 
     # --- 3. 結合 (Adjust基準 Left Join) ---
-    # Adjust를 기준으로 하므로 how='left'를 사용. (내부 DB에 아직 데이터가 없어도 Adjust 기준으론 보여야 함)
     df = pd.merge(adj_grouped, int_grouped, left_on='campaign_network', right_on='campaign_name_clean', how='left')
     
     if df.empty: return df
@@ -85,13 +80,19 @@ def run_growth_audit(df_adj, df_int):
     avg_int = df["intensity"].mean()
     avg_bm = df["bm_rate"].mean()
 
-    # NaN(내부 데이터가 아직 없는 캠페인)인 경우 점수를 깎지 않고 50점(不明/보통) 처리하도록 예외 로직 추가
+    # スコア化
     df["s_traffic"] = df["cpi"].apply(lambda x: "不明" if pd.isna(x) or pd.isna(avg_cpi) else ("良好" if x <= avg_cpi*0.85 else ("普通" if x <= avg_cpi*1.15 else "注意"))).map(map_score)
     df["s_activation"] = df["activation"].apply(lambda x: 50 if pd.isna(x) else (100 if x >= 0.7 else (60 if x >= 0.5 else 30)))
     df["s_intensity"] = df["intensity"].apply(lambda x: "不明" if pd.isna(x) or pd.isna(avg_int) else ("良好" if x >= avg_int*1.15 else ("普通" if x >= avg_int*0.85 else "注意"))).map(map_score)
     df["s_retention"] = df["retention_d7"].apply(lambda x: 50 if pd.isna(x) else (100 if x >= 0.25 else (60 if x >= 0.15 else 30)))
     df["s_bm"] = df["bm_rate"].apply(lambda x: "不明" if pd.isna(x) or pd.isna(avg_bm) else ("良好" if x >= avg_bm*1.15 else ("普通" if x >= avg_bm*0.85 else "注意"))).map(map_score)
-    df["s_payback"] = df["payback"].apply(lambda x: 50 if pd.isna(x) else (100 if x <= 1.2 else (60 if x <= 2.5 else 20)))
+    
+    # cost가 0인 경우 s_payback을 0으로 처리, 그 외의 경우 기존 로직 적용
+    df["s_payback"] = df.apply(
+        lambda x: 0 if x["cost"] == 0 else (
+            50 if pd.isna(x["payback"]) else (100 if x["payback"] <= 1.2 else (60 if x["payback"] <= 2.5 else 20))
+        ), axis=1
+    )
 
     df["growth_health_score"] = (df["s_traffic"]*0.1 + df["s_activation"]*0.15 + df["s_intensity"]*0.15 + df["s_retention"]*0.2 + df["s_bm"]*0.25 + df["s_payback"]*0.15).round(1)
     df["growth_category"] = df["growth_health_score"].apply(score_category)
@@ -129,7 +130,6 @@ if adj_file and int_file:
         st.markdown("### Overview")
         k1, k2, k3 = st.columns(3)
         
-        # NaN 에러 방지 (값이 NaN일 때 화면 렌더링이 깨지는 현상 방지)
         mean_score = audit_df['growth_health_score'].mean()
         mean_conf = audit_df['confidence_score'].mean()
         
@@ -145,7 +145,6 @@ if adj_file and int_file:
         sel_cp = f3.selectbox("Campaign", ["All"] + sorted(audit_df['campaign_network'].dropna().unique().tolist()))
         sel_ct = f4.selectbox("Growth Category", ["All"] + sorted(audit_df['growth_category'].dropna().unique().tolist()))
 
-        # 다중 채널/OS를 대비해 contains 로직으로 필터링 강화
         f_df = audit_df.copy()
         if sel_ch != "All": f_df = f_df[f_df['channel'].str.contains(sel_ch, na=False)]
         if sel_os != "All": f_df = f_df[f_df['os_name'].str.contains(sel_os, na=False)]
@@ -161,24 +160,17 @@ if adj_file and int_file:
         ).properties(height=400).interactive()
         st.altair_chart(scatter, use_container_width=True)
 
-       # Campaign Table
         st.markdown("### Campaign Table")
         def style_red(val):
             return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
         
-        # Growth Score 관련 모든 컬럼을 추가했습니다.
+        # 테이블 컬럼에서 s_ 항목들을 모두 제외하고 실제 수치 데이터만 표시
         display_cols = [
             "campaign_network", "channel", "os_name", 
             "growth_category", "growth_health_score", "confidence_score",
-            "cpi", "s_traffic", 
-            "activation", "s_activation", 
-            "intensity", "s_intensity", 
-            "retention_d7", "s_retention", 
-            "bm_rate", "s_bm", 
-            "payback", "s_payback"
+            "cpi", "activation", "intensity", "retention_d7", "bm_rate", "payback"
         ]
         
-        # 소수점 출력을 깔끔하게 하기 위해 포맷팅 적용 (선택 사항)
         st.dataframe(
             f_df[display_cols].style
             .map(style_red, subset=["growth_health_score"])
