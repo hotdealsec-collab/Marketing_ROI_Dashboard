@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 import altair as alt
-from rapidfuzz import process
 import re
 
 # --------------------------------------------------
@@ -19,10 +18,14 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # --------------------------------------------------
-# 2. ロジック関数
+# 2. 判定ロジック関数
 # --------------------------------------------------
 def safe_divide(a, b):
     return a / b if (pd.notna(a) and pd.notna(b) and b != 0) else np.nan
+
+def map_score(value):
+    score_map = {"良好": 100, "普通": 60, "注意": 30, "リスクあり": 20, "不明": 50}
+    return score_map.get(value, 50)
 
 def score_category(score):
     if pd.isna(score): return "不明"
@@ -32,42 +35,41 @@ def score_category(score):
     return "要確認 (Critical)"
 
 # --------------------------------------------------
-# 3. データ処理エンジン (外部・内部の両方で重複を合算)
+# 3. データ処理エンジン (完全一致 & 重複排除)
 # --------------------------------------------------
 def run_growth_audit(df_adj, df_int):
-    # --- 1. 外部データの集計 (キャンペーン名で1行にまとめる) ---
+    # --- 1. 外部データ(Adjust)の集計 ---
+    # 同一キャンペーンが複数行にある場合を合算し、1キャンペーン1行にする
     adj_grouped = df_adj.groupby('campaign_network').agg({
         'cost': 'sum',
         'installs': 'sum',
         'all_revenue': 'sum',
-        'channel': lambda x: ', '.join(x.unique()),
-        'os_name': lambda x: ', '.join(x.unique())
+        'channel': lambda x: ', '.join(x.unique().astype(str)),
+        'os_name': lambda x: ', '.join(x.unique().astype(str))
     }).reset_index()
 
-    # --- 2. 内部データの集計 (IDを削除して名前で合算) ---
+    # --- 2. 内部データのクレンジングと集計 ---
     df_int = df_int.copy().dropna(subset=['campaign_name'])
-    # 正規表現で括弧とその中身を削除
-    df_int['campaign_clean'] = df_int['campaign_name'].apply(lambda x: re.sub(r'\s*\([^)]*\)', '', str(x)).strip())
     
-    int_grouped = df_int.groupby('campaign_clean').agg({
+    # 括弧とその中のID（例: " (21944452275)"）を削除して完全一致用の名前を作成
+    def clean_campaign_name(name):
+        return re.sub(r'\s*\(\d+\)$', '', str(name)).strip()
+
+    df_int['campaign_name_clean'] = df_int['campaign_name'].apply(clean_campaign_name)
+    
+    # 同一名になったキャンペーンの指標を合算
+    int_grouped = df_int.groupby('campaign_name_clean').agg({
         'user_count': 'sum', 'ru_count': 'sum', 'd1_count': 'sum',
         'd7_count': 'sum', 'product_count': 'sum', 'bm_user_count': 'sum', 'r_sales': 'sum'
     }).reset_index()
 
-    # --- 3. マッチング ---
-    adj_list = adj_grouped['campaign_network'].unique().tolist()
-    def find_match(name):
-        match = process.extractOne(name, adj_list, score_cutoff=75)
-        return match[0] if match else None
-
-    int_grouped['matched_campaign'] = int_grouped['campaign_clean'].apply(find_match)
-    
-    # 完全に1対1でマージ
-    df = pd.merge(adj_grouped, int_grouped, left_on='campaign_network', right_on='matched_campaign', how='inner')
+    # --- 3. 完全一致(Exact Match)での結合 ---
+    # Adjustのキャンペーン名と、クレンジング後の社内キャンペーン名を紐付け
+    df = pd.merge(adj_grouped, int_grouped, left_on='campaign_network', right_on='campaign_name_clean', how='inner')
     
     if df.empty: return df
 
-    # --- 4. スコア計算 (6要素) ---
+    # --- 4. 指標計算とスコアリング ---
     df["cpi"] = df.apply(lambda x: safe_divide(x["cost"], x["installs"]), axis=1)
     df["activation"] = df.apply(lambda x: safe_divide(x["ru_count"], x["user_count"]), axis=1)
     df["intensity"] = df.apply(lambda x: safe_divide(x["product_count"], x["ru_count"]), axis=1)
@@ -75,21 +77,14 @@ def run_growth_audit(df_adj, df_int):
     df["bm_rate"] = df.apply(lambda x: safe_divide(x["bm_user_count"], x["user_count"]), axis=1)
     df["payback"] = df.apply(lambda x: safe_divide(x["cost"], x["r_sales"]), axis=1)
 
-    # スコア化 (100点満点換算)
-    def get_score(val, avg, inverse=False):
-        if pd.isna(val) or pd.isna(avg): return 50
-        ratio = val / avg if not inverse else avg / val
-        if ratio >= 1.15: return 100
-        if ratio >= 0.85: return 60
-        return 30
-
     avg_cpi = df["cpi"].mean(); avg_int = df["intensity"].mean(); avg_bm = df["bm_rate"].mean()
 
-    df["s_traffic"] = df["cpi"].apply(lambda x: get_score(x, avg_cpi, True))
+    # スコア化
+    df["s_traffic"] = df["cpi"].apply(lambda x: "良好" if x <= avg_cpi*0.85 else ("普通" if x <= avg_cpi*1.15 else "注意")).map(map_score)
     df["s_activation"] = df["activation"].apply(lambda x: 100 if x >= 0.7 else (60 if x >= 0.5 else 30))
-    df["s_intensity"] = df["intensity"].apply(lambda x: get_score(x, avg_int))
+    df["s_intensity"] = df["intensity"].apply(lambda x: "良好" if x >= avg_int*1.15 else ("普通" if x >= avg_int*0.85 else "注意")).map(map_score)
     df["s_retention"] = df["retention_d7"].apply(lambda x: 100 if x >= 0.25 else (60 if x >= 0.15 else 30))
-    df["s_bm"] = df["bm_rate"].apply(lambda x: get_score(x, avg_bm))
+    df["s_bm"] = df["bm_rate"].apply(lambda x: "良好" if x >= avg_bm*1.15 else ("普通" if x >= avg_bm*0.85 else "注意")).map(map_score)
     df["s_payback"] = df["payback"].apply(lambda x: 100 if x <= 1.2 else (60 if x <= 2.5 else 20))
 
     df["growth_health_score"] = (df["s_traffic"]*0.1 + df["s_activation"]*0.15 + df["s_intensity"]*0.15 + df["s_retention"]*0.2 + df["s_bm"]*0.25 + df["s_payback"]*0.15).round(1)
@@ -103,28 +98,28 @@ def run_growth_audit(df_adj, df_int):
 # --------------------------------------------------
 st.title("Campaign Health Check")
 
-# サイドバーは常に表示 (ヘルプ含む)
+# サイドバー: アップロード & 算出根拠
 st.sidebar.header("Upload")
 adj_file = st.sidebar.file_uploader("Adjust CSV", type="csv")
 int_file = st.sidebar.file_uploader("Internal SQL CSV", type="csv")
 
 st.sidebar.markdown("---")
 with st.sidebar.expander("ℹ️ Growth Scoreの算出根拠", expanded=True):
-    st.write("- Traffic(10%), Activation(15%), Intensity(15%), Retention(20%), BM Contribution(25%), Payback(15%)")
+    st.markdown("""
+    総合スコアの重み付け：
+    - **Traffic (10%)**: CPI効率
+    - **Activation (15%)**: 作品閲覧転換率
+    - **Intensity (15%)**: 平均閲覧作品数
+    - **Retention (20%)**: D7維持率
+    - **BM Contribution (25%)**: BM利用率
+    - **Payback (15%)**: 投資回収効率
+    """)
 
 if adj_file and int_file:
-    # データの読み込み
-    df_adj_raw = pd.read_csv(adj_file)
-    df_int_raw = pd.read_csv(int_file)
-    
-    # 解析実行
-    audit_df = run_growth_audit(df_adj_raw, df_int_raw)
+    audit_df = run_growth_audit(pd.read_csv(adj_file), pd.read_csv(int_file))
 
     if audit_df.empty:
-        st.error("❌ キャンペーンの紐付け結果が0件です。名前の形式を確認してください。")
-        col_a, col_b = st.columns(2)
-        col_a.write("Adjustのキャンペーン名例:", df_adj_raw['campaign_network'].unique()[:5])
-        col_b.write("社内データのキャンペーン名例:", df_int_raw['campaign_name'].unique()[:5])
+        st.error("❌ キャンペーンの一致が確認できませんでした。Adjustの'campaign_network'と社内データの'campaign_name'を確認してください。")
     else:
         # Overview
         st.markdown("### Overview")
@@ -133,35 +128,38 @@ if adj_file and int_file:
         k2.metric("Average Confidence", f"{audit_df['confidence_score'].mean():.1f}")
         k3.metric("Campaigns (Unique)", len(audit_df))
 
-        # --- Filters (常に表示されるように修正) ---
+        # --- Filters (メイン画面に直接配置) ---
         st.markdown("### Filters")
-        f1, f2, f3 = st.columns(3)
-        sel_ch = f1.selectbox("Channel", ["All"] + sorted(list(set([c.split(',')[0].strip() for c in audit_df['channel']]))))
-        sel_os = f2.selectbox("OS", ["All"] + ["android", "ios", "android, ios"])
-        sel_ct = f3.selectbox("Growth Category", ["All"] + sorted(audit_df['growth_category'].unique().tolist()))
+        f1, f2, f3, f4 = st.columns(4)
+        
+        sel_ch = f1.selectbox("Channel", ["All"] + sorted(audit_df['channel'].unique().tolist()))
+        sel_os = f2.selectbox("OS", ["All"] + sorted(audit_df['os_name'].unique().tolist()))
+        sel_cp = f3.selectbox("Campaign", ["All"] + sorted(audit_df['campaign_network'].unique().tolist()))
+        sel_ct = f4.selectbox("Growth Category", ["All"] + sorted(audit_df['growth_category'].unique().tolist()))
 
-        # フィルタリング
+        # フィルタリング適用
         f_df = audit_df.copy()
-        if sel_ch != "All": f_df = f_df[f_df['channel'].str.contains(sel_ch)]
-        if sel_os != "All": f_df = f_df[f_df['os_name'].str.contains(sel_os)]
+        if sel_ch != "All": f_df = f_df[f_df['channel'] == sel_ch]
+        if sel_os != "All": f_df = f_df[f_df['os_name'] == sel_os]
+        if sel_cp != "All": f_df = f_df[f_df['campaign_network'] == sel_cp]
         if sel_ct != "All": f_df = f_df[f_df['growth_category'] == sel_ct]
 
-        # Chart
+        # Positioning Chart
         st.markdown("### Campaign Positioning")
         scatter = alt.Chart(f_df).mark_circle(size=140).encode(
             x=alt.X("growth_health_score:Q", title="Growth Health"),
             y=alt.Y("confidence_score:Q", title="Confidence"),
-            color=alt.Color("growth_category:N"),
+            color=alt.Color("growth_category:N", title="Category"),
             tooltip=["campaign_network", "growth_health_score", "growth_category"]
         ).properties(height=400).interactive()
-        st.altair_chart(scatter, width='stretch')
+        st.altair_chart(scatter, use_container_width=True)
 
-        # Table (グローススコアと判定を表示)
+        # Campaign Table
         st.markdown("### Campaign Table")
         def style_red(val):
             return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
         
         display_cols = ["campaign_network", "channel", "os_name", "growth_health_score", "growth_category", "bm_rate", "intensity", "retention_d7"]
-        st.dataframe(f_df[display_cols].style.map(style_red, subset=["growth_health_score"]), width='stretch', height=500)
+        st.dataframe(f_df[display_cols].style.map(style_red, subset=["growth_health_score"]), use_container_width=True, height=500)
 else:
     st.info("左右のCSVファイルをアップロードしてください。")
