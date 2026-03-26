@@ -2,3 +2,5 @@ streamlit
 pandas
 plotly
 rapidfuzz
+altair
+matplotlib
