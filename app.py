@@ -5,7 +5,7 @@ import altair as alt
 from rapidfuzz import process
 
 # --------------------------------------------------
-# 1. ページ設定 & スタイル (페이지 설정 & 스타일)
+# 1. ページ設定 & スタイル
 # --------------------------------------------------
 st.set_page_config(page_title="Campaign Health Check", layout="wide")
 
@@ -14,12 +14,11 @@ st.markdown("""
 .block-container { padding-top: 1.5rem; }
 .small-note { color: #6b7280; font-size: 0.9rem; }
 .stMetric { background-color: #f8fafc; padding: 15px; border-radius: 12px; border: 1px solid #e2e8f0; }
-.section-header { margin-top: 1.5rem; margin-bottom: 1rem; font-weight: bold; }
 </style>
 """, unsafe_allow_html=True)
 
 # --------------------------------------------------
-# 2. ロジック関数 (로직 함수)
+# 2. ロジック関数
 # --------------------------------------------------
 def safe_divide(a, b):
     return a / b if (pd.notna(a) and pd.notna(b) and b != 0) else np.nan
@@ -35,12 +34,15 @@ def score_category(score):
     return "要確認 (Critical)"
 
 # --------------------------------------------------
-# 3. データ処理エンジン (데이터 처리 엔진)
+# 3. データ処理エンジン
 # --------------------------------------------------
 def run_growth_audit(df_adj, df_int):
-    # キャンペーン名マッチング (Fuzzy Matching)
+    # 内部データのキャンペーン名が空の行を除外
+    df_int = df_int.dropna(subset=['campaign_name'])
+    
+    # キャンペーン名マッチング
     df_int['campaign_clean'] = df_int['campaign_name'].str.split(' \(').str[0].str.strip()
-    adj_campaigns = df_adj['campaign_network'].unique().tolist()
+    adj_campaigns = df_adj['campaign_network'].dropna().unique().tolist()
     
     def find_match(name):
         match = process.extractOne(name, adj_campaigns, score_cutoff=80)
@@ -49,7 +51,7 @@ def run_growth_audit(df_adj, df_int):
     df_int['matched_campaign'] = df_int['campaign_clean'].apply(find_match)
     df = pd.merge(df_adj, df_int, left_on='campaign_network', right_on='matched_campaign', how='inner')
     
-    # 指標計算 (6要素)
+    # 指標計算
     df["cpi"] = df.apply(lambda x: safe_divide(x["cost"], x["installs"]), axis=1)
     df["activation_rate"] = df.apply(lambda x: safe_divide(x["ru_count"], x["user_count"]), axis=1)
     df["reading_intensity"] = df.apply(lambda x: safe_divide(x["product_count"], x["ru_count"]), axis=1)
@@ -70,79 +72,76 @@ def run_growth_audit(df_adj, df_int):
     df["growth_health_score"] = (df["s_traffic"]*0.1 + df["s_activation"]*0.15 + df["s_intensity"]*0.15 + df["s_retention"]*0.2 + df["s_bm"]*0.25 + df["s_payback"]*0.15).round(1)
     df["growth_category"] = df["growth_health_score"].apply(score_category)
     
-    # 信頼度スコア
     df["confidence_score"] = df.apply(lambda x: max(100 - (50 if x["cost"]==0 else 0) - (15 if str(x["os_name"]).lower()=="ios" else 0), 0), axis=1)
     
     return df
 
 # --------------------------------------------------
-# 4. メイン画面の構築 (메인 화면 구축)
+# 4. メイン画面の構築
 # --------------------------------------------------
 st.title("Campaign Health Check")
 st.markdown("<p class='small-note'>Performance × Measurement Confidence</p>", unsafe_allow_html=True)
 
-# サイドバー: ファイルアップロード
 st.sidebar.header("Upload")
 adj_file = st.sidebar.file_uploader("Adjust CSV (External)", type="csv")
 int_file = st.sidebar.file_uploader("Internal SQL CSV (Internal)", type="csv")
 
-# 사이드바 하단 도움말
-st.sidebar.markdown("---")
-with st.sidebar.expander("ℹ️ Growth Scoreの算出根拠", expanded=False):
-    st.write("Traffic(10%), Activation(15%), Intensity(15%), Retention(20%), BM Contribution(25%), Payback(15%)")
-
 if adj_file and int_file:
-    # データ処理
-    raw_adj = pd.read_csv(adj_file)
-    raw_int = pd.read_csv(int_file)
-    audit_df = run_growth_audit(raw_adj, raw_int)
+    # データ読み込みとエラーハンドリング
+    try:
+        raw_adj = pd.read_csv(adj_file)
+        raw_int = pd.read_csv(int_file)
+        audit_df = run_growth_audit(raw_adj, raw_int)
 
-    # --- Overview KPI ---
-    st.markdown("### Overview")
-    k1, k2, k3 = st.columns(3)
-    k1.metric("Average Growth Score", f"{audit_df['growth_health_score'].mean():.1f}")
-    k2.metric("Average Confidence", f"{audit_df['confidence_score'].mean():.1f}")
-    k3.metric("Campaigns", len(audit_df))
+        # Overview
+        st.markdown("### Overview")
+        k1, k2, k3 = st.columns(3)
+        k1.metric("Average Growth Score", f"{audit_df['growth_health_score'].mean():.1f}")
+        k2.metric("Average Confidence", f"{audit_df['confidence_score'].mean():.1f}")
+        k3.metric("Campaigns", len(audit_df))
 
-    # --- Filters (메인 화면 배치) ---
-    st.markdown("### Filters")
-    f1, f2, f3, f4 = st.columns(4)
-    
-    # 필터 옵션 추출
-    channel_list = ["All"] + sorted(audit_df['channel'].unique().tolist())
-    os_list = ["All"] + sorted(audit_df['os_name'].unique().tolist())
-    campaign_list = ["All"] + sorted(audit_df['campaign_network'].unique().tolist())
-    category_list = ["All"] + sorted(audit_df['growth_category'].unique().tolist())
+        # --- Filters (NaN対策済み) ---
+        st.markdown("### Filters")
+        f1, f2, f3, f4 = st.columns(4)
+        
+        # .dropna() を追加して NaN によるソートエラーを防止
+        channel_list = ["All"] + sorted(audit_df['channel'].dropna().unique().tolist())
+        os_list = ["All"] + sorted(audit_df['os_name'].dropna().unique().tolist())
+        campaign_list = ["All"] + sorted(audit_df['campaign_network'].dropna().unique().tolist())
+        category_list = ["All"] + sorted(audit_df['growth_category'].dropna().unique().tolist())
 
-    sel_channel = f1.selectbox("Channel", channel_list)
-    sel_os = f2.selectbox("OS", os_list)
-    sel_campaign = f3.selectbox("Campaign", campaign_list)
-    sel_category = f4.selectbox("Growth Category", category_list)
+        sel_channel = f1.selectbox("Channel", channel_list)
+        sel_os = f2.selectbox("OS", os_list)
+        sel_campaign = f3.selectbox("Campaign", campaign_list)
+        sel_category = f4.selectbox("Growth Category", category_list)
 
-    # 필터링 적용
-    filtered_df = audit_df.copy()
-    if sel_channel != "All": filtered_df = filtered_df[filtered_df['channel'] == sel_channel]
-    if sel_os != "All": filtered_df = filtered_df[filtered_df['os_name'] == sel_os]
-    if sel_campaign != "All": filtered_df = filtered_df[filtered_df['campaign_network'] == sel_campaign]
-    if sel_category != "All": filtered_df = filtered_df[filtered_df['growth_category'] == sel_category]
+        # フィルタリング
+        filtered_df = audit_df.copy()
+        if sel_channel != "All": filtered_df = filtered_df[filtered_df['channel'] == sel_channel]
+        if sel_os != "All": filtered_df = filtered_df[filtered_df['os_name'] == sel_os]
+        if sel_campaign != "All": filtered_df = filtered_df[filtered_df['campaign_network'] == sel_campaign]
+        if sel_category != "All": filtered_df = filtered_df[filtered_df['growth_category'] == sel_category]
 
-    # --- Visuals ---
-    st.markdown("### Campaign Positioning")
-    scatter = alt.Chart(filtered_df).mark_circle(size=140).encode(
-        x=alt.X("growth_health_score:Q", title="Growth Health Score"),
-        y=alt.Y("confidence_score:Q", title="Measurement Confidence Score"),
-        color=alt.Color("growth_category:N", title="Category"),
-        tooltip=["campaign_network", "channel", "growth_health_score", "confidence_score"]
-    ).properties(height=420).interactive()
-    st.altair_chart(scatter, use_container_width=True)
+        if not filtered_df.empty:
+            # Visuals
+            st.markdown("### Campaign Positioning")
+            scatter = alt.Chart(filtered_df).mark_circle(size=140).encode(
+                x=alt.X("growth_health_score:Q", title="Growth Health Score"),
+                y=alt.Y("confidence_score:Q", title="Measurement Confidence Score"),
+                color=alt.Color("growth_category:N", title="Category"),
+                tooltip=["campaign_network", "channel", "growth_health_score"]
+            ).properties(height=420).interactive()
+            st.altair_chart(scatter, use_container_width=True)
 
-    # --- Table ---
-    st.markdown("### Campaign Table")
-    def highlight_low(val):
-        return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
+            # Table
+            st.markdown("### Campaign Table")
+            display_cols = ["channel", "campaign_network", "os_name", "growth_health_score", "confidence_score", "growth_category"]
+            st.dataframe(filtered_df[display_cols], use_container_width=True, height=500)
+        else:
+            st.warning("一致するデータがありません。フィルター条件を変更してください。")
 
-    display_cols = ["channel", "campaign_network", "os_name", "growth_health_score", "confidence_score", "growth_category"]
-    st.dataframe(filtered_df[display_cols].style.applymap(highlight_low, subset=["growth_health_score", "confidence_score"]), use_container_width=True, height=500)
+    except Exception as e:
+        st.error(f"データ処理中にエラーが発生しました: {e}")
 
 else:
-    st.info("CSVファイルをアップロードしてください。")
+    st.info("サイドバーからAdjustデータと社内データの両方をアップロードしてください。")
