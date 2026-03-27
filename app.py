@@ -126,6 +126,22 @@ adj_file = st.sidebar.file_uploader("Adjust CSV", type="csv")
 int_file = st.sidebar.file_uploader("Internal SQL CSV", type="csv")
 
 st.sidebar.markdown("---")
+
+# --------------------------------------------------
+# 計算ロジックの説明 (Expander)
+# --------------------------------------------------
+with st.sidebar.expander("ℹ️ スコアの計算ロジック（Guide）", expanded=False):
+    st.markdown("""
+    **📈 Growth Health Score (0~100点)**
+    各指標を基準値（平均値や絶対値）と比較し、「良好(100点)」「普通(60点)」「注意(30点)」等にスコア化。それに以下のスライダーの重みを掛けて合算します。
+    
+    **📊 Confidence Score (0~100点)**
+    データの信頼度を表します。基本100点から、以下の要因で減点されます。
+    * **-50点**: 広告コスト(Cost)が 0 の場合（効率計算不可）
+    * **-50点**: 社内データが紐付かない場合（内部行動分析不可）
+    * **-20点**: iOSのSKANデータが含まれる場合（乖離リスクあり）
+    """)
+
 st.sidebar.header("2. Weight Settings (%)")
 st.sidebar.markdown("<div class='small-note'>各指標の重みを調整できます（合計100%推奨）</div>", unsafe_allow_html=True)
 
@@ -180,9 +196,9 @@ if adj_file and int_file:
         if sel_cp: f_df = f_df[f_df['campaign_network'].isin(sel_cp)]
         if sel_ct != "All": f_df = f_df[f_df['growth_category'] == sel_ct]
 
-        # --- Data Sorting (우수한 캠페인 순으로 정렬) ---
-        # 1순위: Growth Health Score (내림차순) / 2순위: Confidence Score (내림차순)
-        f_df = f_df.sort_values(by=["growth_health_score", "confidence_score"], ascending=[False, False])
+        # --- Data Sorting & Ranking ---
+        f_df = f_df.sort_values(by=["growth_health_score", "confidence_score"], ascending=[False, False]).reset_index(drop=True)
+        f_df.insert(0, 'Rank', range(1, len(f_df) + 1))
 
         # --- Overview ---
         st.markdown("### Overview")
@@ -209,7 +225,7 @@ if adj_file and int_file:
             x=alt.X("plot_x:Q", title="Growth Health Score", scale=alt.Scale(zero=False)),
             y=alt.Y("plot_y:Q", title="Confidence", scale=alt.Scale(zero=False)),
             color=alt.Color("growth_category:N", title="Category"),
-            tooltip=["campaign_network", "growth_health_score", "confidence_score", "growth_category"]
+            tooltip=["Rank", "campaign_network", "growth_health_score", "confidence_score", "growth_category"]
         ).properties(height=400).interactive()
         st.altair_chart(scatter, use_container_width=True)
 
@@ -218,7 +234,7 @@ if adj_file and int_file:
         col_title.markdown("### Campaign Table")
         
         display_cols = [
-            "campaign_network", "channel", "os_name", "growth_category", "growth_health_score", "confidence_score",
+            "Rank", "campaign_network", "channel", "os_name", "growth_category", "growth_health_score", "confidence_score",
             "cpi", "activation", "intensity", "retention_d7", "bm_rate", "payback"
         ]
 
@@ -226,19 +242,17 @@ if adj_file and int_file:
         def convert_df(df):
             return df.to_csv(index=False).encode('utf-8-sig')
 
-        # 정렬된 상태 그대로 CSV 다운로드
         csv_data = convert_df(f_df[display_cols])
-        col_btn.download_button(label="📥 Download CSV", data=csv_data, file_name='campaign_health_check_sorted.csv', mime='text/csv')
+        col_btn.download_button(label="📥 Download CSV", data=csv_data, file_name='campaign_health_check_ranked.csv', mime='text/csv')
 
         def style_red(val):
             return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
         
-        # 정렬된 데이터프레임 렌더링
         st.dataframe(
             f_df[display_cols].style
             .map(style_red, subset=["growth_health_score"])
             .format({"cpi": "{:.2f}", "activation": "{:.1%}", "intensity": "{:.2f}", "retention_d7": "{:.1%}", "bm_rate": "{:.1%}", "payback": "{:.2f}"}, na_rep="N/A"), 
-            use_container_width=True, height=500
+            use_container_width=True, height=500, hide_index=True
         )
 else:
     st.info("左右のCSVファイルをアップロードしてください。")
