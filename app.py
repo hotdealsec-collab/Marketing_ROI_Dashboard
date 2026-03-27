@@ -38,8 +38,15 @@ def score_category(score):
 # --------------------------------------------------
 def run_growth_audit(df_adj, df_int, weights):
     # --- 1. 外部データ(Adjust)のクレンジングと集計 ---
+    if 'campaign_network' not in df_adj.columns:
+        return pd.DataFrame() # 필수 키가 없으면 빈 데이터프레임 반환
+        
     df_adj = df_adj.dropna(subset=['campaign_network']).copy()
     df_adj['campaign_network'] = df_adj['campaign_network'].astype(str).str.strip()
+    
+    # [수정] cohort_all_revenue 컬럼이 있다면 all_revenue로 통일해서 이름 변경
+    if 'cohort_all_revenue' in df_adj.columns and 'all_revenue' not in df_adj.columns:
+        df_adj.rename(columns={'cohort_all_revenue': 'all_revenue'}, inplace=True)
     
     def get_os_label(x):
         unique_os = sorted(x.dropna().unique().astype(str).tolist())
@@ -47,17 +54,27 @@ def run_growth_audit(df_adj, df_int, weights):
         elif len(unique_os) == 1: return unique_os[0]
         else: return np.nan
 
-    adj_grouped = df_adj.groupby('campaign_network').agg({
-        'cost': 'sum', 
-        'installs': 'sum', 
-        'reattributions': 'sum',
-        'skad_installs': 'sum',
-        'all_revenue': 'sum',
+    # 유연한 집계(Aggregation) 딕셔너리 생성
+    agg_dict = {
         'channel': lambda x: ', '.join(x.dropna().unique().astype(str)),
         'os_name': get_os_label
-    }).reset_index()
+    }
+    if 'cost' in df_adj.columns: agg_dict['cost'] = 'sum'
+    else: df_adj['cost'] = 0; agg_dict['cost'] = 'sum'
+    
+    if 'installs' in df_adj.columns: agg_dict['installs'] = 'sum'
+    else: df_adj['installs'] = 0; agg_dict['installs'] = 'sum'
+    
+    if 'reattributions' in df_adj.columns: agg_dict['reattributions'] = 'sum'
+    if 'skad_installs' in df_adj.columns: agg_dict['skad_installs'] = 'sum'
+    if 'all_revenue' in df_adj.columns: agg_dict['all_revenue'] = 'sum'
+
+    adj_grouped = df_adj.groupby('campaign_network').agg(agg_dict).reset_index()
 
     # --- 2. 内部データのクレンジングと集計 ---
+    if 'campaign_name' not in df_int.columns:
+        return pd.DataFrame()
+        
     df_int = df_int.dropna(subset=['campaign_name']).copy()
     def clean_campaign_name(name):
         return re.sub(r'\s*\(\d+\)\s*$', '', str(name)).strip()
@@ -127,9 +144,6 @@ int_file = st.sidebar.file_uploader("Internal SQL CSV", type="csv")
 
 st.sidebar.markdown("---")
 
-# --------------------------------------------------
-# 計算ロジックの説明 (Expander)
-# --------------------------------------------------
 with st.sidebar.expander("ℹ️ スコアの計算ロジック（Guide）", expanded=False):
     st.markdown("""
     **📈 Growth Health Score (0~100点)**
@@ -207,52 +221,4 @@ if adj_file and int_file:
             mean_score = f_df['growth_health_score'].mean()
             mean_conf = f_df['confidence_score'].mean()
             k1.metric("Average Growth Score", f"{mean_score:.1f}" if pd.notna(mean_score) else "N/A")
-            k2.metric("Average Confidence", f"{mean_conf:.1f}" if pd.notna(mean_conf) else "N/A")
-            k3.metric("Campaigns (Unique)", len(f_df))
-        else:
-            k1.metric("Average Growth Score", "N/A")
-            k2.metric("Average Confidence", "N/A")
-            k3.metric("Campaigns (Unique)", 0)
-
-        # --- Positioning Chart ---
-        st.markdown("### Campaign Positioning")
-        f_df_plot = f_df.copy()
-        np.random.seed(42) 
-        f_df_plot["plot_x"] = f_df_plot["growth_health_score"] + np.random.uniform(-1.0, 1.0, len(f_df_plot))
-        f_df_plot["plot_y"] = f_df_plot["confidence_score"] + np.random.uniform(-1.0, 1.0, len(f_df_plot))
-
-        scatter = alt.Chart(f_df_plot).mark_circle(size=140, opacity=0.7).encode(
-            x=alt.X("plot_x:Q", title="Growth Health Score", scale=alt.Scale(zero=False)),
-            y=alt.Y("plot_y:Q", title="Confidence", scale=alt.Scale(zero=False)),
-            color=alt.Color("growth_category:N", title="Category"),
-            tooltip=["Rank", "campaign_network", "growth_health_score", "confidence_score", "growth_category"]
-        ).properties(height=400).interactive()
-        st.altair_chart(scatter, use_container_width=True)
-
-        # --- Campaign Table & Download CSV ---
-        col_title, col_btn = st.columns([4, 1])
-        col_title.markdown("### Campaign Table")
-        
-        display_cols = [
-            "Rank", "campaign_network", "channel", "os_name", "growth_category", "growth_health_score", "confidence_score",
-            "cpi", "activation", "intensity", "retention_d7", "bm_rate", "payback"
-        ]
-
-        @st.cache_data
-        def convert_df(df):
-            return df.to_csv(index=False).encode('utf-8-sig')
-
-        csv_data = convert_df(f_df[display_cols])
-        col_btn.download_button(label="📥 Download CSV", data=csv_data, file_name='campaign_health_check_ranked.csv', mime='text/csv')
-
-        def style_red(val):
-            return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
-        
-        st.dataframe(
-            f_df[display_cols].style
-            .map(style_red, subset=["growth_health_score"])
-            .format({"cpi": "{:.2f}", "activation": "{:.1%}", "intensity": "{:.2f}", "retention_d7": "{:.1%}", "bm_rate": "{:.1%}", "payback": "{:.2f}"}, na_rep="N/A"), 
-            use_container_width=True, height=500, hide_index=True
-        )
-else:
-    st.info("左右のCSVファイルをアップロードしてください。")
+            k2.metric("Average Confidence", f"{mean_conf:.1f}" if pd.notna(mean_conf) else "
