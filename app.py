@@ -47,12 +47,11 @@ def run_growth_audit(df_adj, df_int, weights):
         elif len(unique_os) == 1: return unique_os[0]
         else: return np.nan
 
-    # [수정 1, 2] reattributions와 skad_installs 합계 데이터도 가져오도록 추가
     adj_grouped = df_adj.groupby('campaign_network').agg({
         'cost': 'sum', 
         'installs': 'sum', 
-        'reattributions': 'sum',  # 재기여 인스톨
-        'skad_installs': 'sum',   # SKAN 인스톨
+        'reattributions': 'sum',
+        'skad_installs': 'sum',
         'all_revenue': 'sum',
         'channel': lambda x: ', '.join(x.dropna().unique().astype(str)),
         'os_name': get_os_label
@@ -74,9 +73,7 @@ def run_growth_audit(df_adj, df_int, weights):
     if df.empty: return df
 
     # --- 4. 指標計算とスコアリング ---
-    # [수정 1] CPI 분모를 installs + reattributions 로 변경
     df["cpi"] = df.apply(lambda x: safe_divide(x["cost"], x["installs"] + x.get("reattributions", 0)), axis=1)
-    
     df["activation"] = df.apply(lambda x: safe_divide(x["ru_count"], x["user_count"]), axis=1)
     df["intensity"] = df.apply(lambda x: safe_divide(x["product_count"], x["ru_count"]), axis=1)
     df["retention_d7"] = df.apply(lambda x: safe_divide(x["d7_count"], x["ru_count"]), axis=1)
@@ -108,20 +105,12 @@ def run_growth_audit(df_adj, df_int, weights):
     
     df["growth_category"] = df["growth_health_score"].apply(score_category)
     
-    # [수정 2, 3] Confidence Score 다중 감점 로직 적용
     def calculate_confidence(row):
         score = 100
-        # 1. 비용이 0인 경우 (-50점)
-        if row["cost"] == 0:
-            score -= 50
-        # 2. 내부 데이터(user_count)가 전혀 없는 경우 (-50점)
-        if pd.isna(row.get("user_count")):
-            score -= 50
-        # 3. SKAN 인스톨 데이터가 섞여있는 경우 (-20점)
-        if pd.notna(row.get("skad_installs")) and row["skad_installs"] > 0:
-            score -= 20
-            
-        return max(score, 0) # 최소 0점 방어
+        if row["cost"] == 0: score -= 50
+        if pd.isna(row.get("user_count")): score -= 50
+        if pd.notna(row.get("skad_installs")) and row["skad_installs"] > 0: score -= 20
+        return max(score, 0)
 
     df["confidence_score"] = df.apply(calculate_confidence, axis=1)
     
@@ -191,6 +180,10 @@ if adj_file and int_file:
         if sel_cp: f_df = f_df[f_df['campaign_network'].isin(sel_cp)]
         if sel_ct != "All": f_df = f_df[f_df['growth_category'] == sel_ct]
 
+        # --- Data Sorting (우수한 캠페인 순으로 정렬) ---
+        # 1순위: Growth Health Score (내림차순) / 2순위: Confidence Score (내림차순)
+        f_df = f_df.sort_values(by=["growth_health_score", "confidence_score"], ascending=[False, False])
+
         # --- Overview ---
         st.markdown("### Overview")
         k1, k2, k3 = st.columns(3)
@@ -233,12 +226,14 @@ if adj_file and int_file:
         def convert_df(df):
             return df.to_csv(index=False).encode('utf-8-sig')
 
+        # 정렬된 상태 그대로 CSV 다운로드
         csv_data = convert_df(f_df[display_cols])
-        col_btn.download_button(label="📥 Download CSV", data=csv_data, file_name='campaign_health_check.csv', mime='text/csv')
+        col_btn.download_button(label="📥 Download CSV", data=csv_data, file_name='campaign_health_check_sorted.csv', mime='text/csv')
 
         def style_red(val):
             return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
         
+        # 정렬된 데이터프레임 렌더링
         st.dataframe(
             f_df[display_cols].style
             .map(style_red, subset=["growth_health_score"])
