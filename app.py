@@ -47,8 +47,13 @@ def run_growth_audit(df_adj, df_int, weights):
         elif len(unique_os) == 1: return unique_os[0]
         else: return np.nan
 
+    # [수정 1, 2] reattributions와 skad_installs 합계 데이터도 가져오도록 추가
     adj_grouped = df_adj.groupby('campaign_network').agg({
-        'cost': 'sum', 'installs': 'sum', 'all_revenue': 'sum',
+        'cost': 'sum', 
+        'installs': 'sum', 
+        'reattributions': 'sum',  # 재기여 인스톨
+        'skad_installs': 'sum',   # SKAN 인스톨
+        'all_revenue': 'sum',
         'channel': lambda x: ', '.join(x.dropna().unique().astype(str)),
         'os_name': get_os_label
     }).reset_index()
@@ -69,7 +74,9 @@ def run_growth_audit(df_adj, df_int, weights):
     if df.empty: return df
 
     # --- 4. 指標計算とスコアリング ---
-    df["cpi"] = df.apply(lambda x: safe_divide(x["cost"], x["installs"]), axis=1)
+    # [수정 1] CPI 분모를 installs + reattributions 로 변경
+    df["cpi"] = df.apply(lambda x: safe_divide(x["cost"], x["installs"] + x.get("reattributions", 0)), axis=1)
+    
     df["activation"] = df.apply(lambda x: safe_divide(x["ru_count"], x["user_count"]), axis=1)
     df["intensity"] = df.apply(lambda x: safe_divide(x["product_count"], x["ru_count"]), axis=1)
     df["retention_d7"] = df.apply(lambda x: safe_divide(x["d7_count"], x["ru_count"]), axis=1)
@@ -100,7 +107,23 @@ def run_growth_audit(df_adj, df_int, weights):
     ).round(1)
     
     df["growth_category"] = df["growth_health_score"].apply(score_category)
-    df["confidence_score"] = df.apply(lambda x: max(100 - (50 if x["cost"]==0 else 0), 0), axis=1)
+    
+    # [수정 2, 3] Confidence Score 다중 감점 로직 적용
+    def calculate_confidence(row):
+        score = 100
+        # 1. 비용이 0인 경우 (-50점)
+        if row["cost"] == 0:
+            score -= 50
+        # 2. 내부 데이터(user_count)가 전혀 없는 경우 (-50점)
+        if pd.isna(row.get("user_count")):
+            score -= 50
+        # 3. SKAN 인스톨 데이터가 섞여있는 경우 (-20점)
+        if pd.notna(row.get("skad_installs")) and row["skad_installs"] > 0:
+            score -= 20
+            
+        return max(score, 0) # 최소 0점 방어
+
+    df["confidence_score"] = df.apply(calculate_confidence, axis=1)
     
     return df
 
@@ -117,7 +140,6 @@ st.sidebar.markdown("---")
 st.sidebar.header("2. Weight Settings (%)")
 st.sidebar.markdown("<div class='small-note'>各指標の重みを調整できます（合計100%推奨）</div>", unsafe_allow_html=True)
 
-# 슬라이더 제목에 일본어 설명을 추가하고, 마우스를 올리면 보이는 tooltip(help)도 추가했습니다.
 w_traffic = st.sidebar.slider("Traffic (CPI効率)", min_value=0, max_value=100, value=10, step=5, help="インストールあたりの獲得コスト効率（CPI）を評価します。")
 w_activation = st.sidebar.slider("Activation (作品閲覧転換率)", min_value=0, max_value=100, value=15, step=5, help="インストール後、実際に作品を閲覧したユーザーの割合です。")
 w_intensity = st.sidebar.slider("Intensity (平均閲覧作品数)", min_value=0, max_value=100, value=15, step=5, help="1ユーザーあたりの平均閲覧作品数で、エンゲージメントの深さを測ります。")
