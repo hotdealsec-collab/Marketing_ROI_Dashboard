@@ -39,12 +39,11 @@ def score_category(score):
 def run_growth_audit(df_adj, df_int, weights):
     # --- 1. 外部データ(Adjust)のクレンジングと集計 ---
     if 'campaign_network' not in df_adj.columns:
-        return pd.DataFrame() # 필수 키가 없으면 빈 데이터프레임 반환
+        return pd.DataFrame() 
         
     df_adj = df_adj.dropna(subset=['campaign_network']).copy()
     df_adj['campaign_network'] = df_adj['campaign_network'].astype(str).str.strip()
     
-    # [수정] cohort_all_revenue 컬럼이 있다면 all_revenue로 통일해서 이름 변경
     if 'cohort_all_revenue' in df_adj.columns and 'all_revenue' not in df_adj.columns:
         df_adj.rename(columns={'cohort_all_revenue': 'all_revenue'}, inplace=True)
     
@@ -54,7 +53,6 @@ def run_growth_audit(df_adj, df_int, weights):
         elif len(unique_os) == 1: return unique_os[0]
         else: return np.nan
 
-    # 유연한 집계(Aggregation) 딕셔너리 생성
     agg_dict = {
         'channel': lambda x: ', '.join(x.dropna().unique().astype(str)),
         'os_name': get_os_label
@@ -87,6 +85,12 @@ def run_growth_audit(df_adj, df_int, weights):
 
     # --- 3. 結合 (Adjust基準 Left Join) ---
     df = pd.merge(adj_grouped, int_grouped, left_on='campaign_network', right_on='campaign_name_clean', how='left')
+    if df.empty: return df
+
+    # --- [NEW] ノイズキャンペーンの除外 (installs + reattributions < 10 AND cost == 0) ---
+    total_installs = df['installs'] + df.get('reattributions', 0)
+    df = df[~((total_installs < 10) & (df['cost'] == 0))].copy()
+    
     if df.empty: return df
 
     # --- 4. 指標計算とスコアリング ---
@@ -148,6 +152,7 @@ with st.sidebar.expander("ℹ️ スコアの計算ロジック（Guide）", exp
     st.markdown("""
     **📈 Growth Health Score (0~100点)**
     各指標を基準値（平均値や絶対値）と比較し、「良好(100点)」「普通(60点)」「注意(30点)」等にスコア化。それに以下のスライダーの重みを掛けて合算します。
+    ※ 有効なデータのみを分析するため、(Installs + Reattributions) が10未満かつコストが0のキャンペーンは自動的に除外されます。
     
     **📊 Confidence Score (0~100点)**
     データの信頼度を表します。基本100点から、以下の要因で減点されます。
