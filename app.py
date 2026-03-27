@@ -1,3 +1,38 @@
+import numpy as np
+import pandas as pd
+import streamlit as st
+import altair as alt
+import re
+
+# --------------------------------------------------
+# 1. ページ設定 & スタイル
+# --------------------------------------------------
+st.set_page_config(page_title="Piccoma Growth Audit Pro", layout="wide")
+
+st.markdown("""
+<style>
+.block-container { padding-top: 1.5rem; }
+.small-note { color: #6b7280; font-size: 0.9rem; }
+</style>
+""", unsafe_allow_html=True)
+
+# --------------------------------------------------
+# 2. 判定ロジック関数
+# --------------------------------------------------
+def safe_divide(a, b):
+    return a / b if (pd.notna(a) and pd.notna(b) and b != 0) else np.nan
+
+def map_score(value):
+    score_map = {"良好": 100, "普通": 60, "注意": 30, "リスクあり": 20, "不明": 50}
+    return score_map.get(value, 50)
+
+def score_category(score):
+    if pd.isna(score): return "不明"
+    if score >= 80: return "健全 (Healthy)"
+    if score >= 60: return "観察 (Monitor)"
+    if score >= 40: return "注意 (Warning)"
+    return "要確認 (Critical)"
+
 # --------------------------------------------------
 # 3. データ処理エンジン (完全一致 & 重複排除)
 # --------------------------------------------------
@@ -9,13 +44,17 @@ def run_growth_audit(df_adj, df_int, weights):
     df_adj = df_adj.dropna(subset=['campaign_network']).copy()
     df_adj['campaign_network'] = df_adj['campaign_network'].astype(str).str.strip()
     
+    # [수정] cohort_all_revenue 컬럼이 있다면 all_revenue로 통일해서 이름 변경
+    if 'cohort_all_revenue' in df_adj.columns and 'all_revenue' not in df_adj.columns:
+        df_adj.rename(columns={'cohort_all_revenue': 'all_revenue'}, inplace=True)
+    
     def get_os_label(x):
         unique_os = sorted(x.dropna().unique().astype(str).tolist())
         if len(unique_os) > 1: return "Cross-platform"
         elif len(unique_os) == 1: return unique_os[0]
         else: return np.nan
 
-    # 유연한 집계(Aggregation) 딕셔너리 생성 (CSV에 존재하는 컬럼만 집계하도록 처리)
+    # 유연한 집계(Aggregation) 딕셔너리 생성
     agg_dict = {
         'channel': lambda x: ', '.join(x.dropna().unique().astype(str)),
         'os_name': get_os_label
@@ -93,3 +132,141 @@ def run_growth_audit(df_adj, df_int, weights):
     df["confidence_score"] = df.apply(calculate_confidence, axis=1)
     
     return df
+
+# --------------------------------------------------
+# 4. メイン UI
+# --------------------------------------------------
+st.title("Campaign Health Check")
+
+st.sidebar.header("1. Upload Data")
+adj_file = st.sidebar.file_uploader("Adjust CSV", type="csv")
+int_file = st.sidebar.file_uploader("Internal SQL CSV", type="csv")
+
+st.sidebar.markdown("---")
+
+with st.sidebar.expander("ℹ️ スコアの計算ロジック（Guide）", expanded=False):
+    st.markdown("""
+    **📈 Growth Health Score (0~100点)**
+    各指標を基準値（平均値や絶対値）と比較し、「良好(100点)」「普通(60点)」「注意(30点)」等にスコア化。それに以下のスライダーの重みを掛けて合算します。
+    
+    **📊 Confidence Score (0~100点)**
+    データの信頼度を表します。基本100点から、以下の要因で減点されます。
+    * **-50点**: 広告コスト(Cost)が 0 の場合（効率計算不可）
+    * **-50点**: 社内データが紐付かない場合（内部行動分析不可）
+    * **-20点**: iOSのSKANデータが含まれる場合（乖離リスクあり）
+    """)
+
+st.sidebar.header("2. Weight Settings (%)")
+st.sidebar.markdown("<div class='small-note'>各指標の重みを調整できます（合計100%推奨）</div>", unsafe_allow_html=True)
+
+w_traffic = st.sidebar.slider("Traffic (CPI効率)", min_value=0, max_value=100, value=10, step=5, help="インストールあたりの獲得コスト効率（CPI）を評価します。")
+w_activation = st.sidebar.slider("Activation (作品閲覧転換率)", min_value=0, max_value=100, value=15, step=5, help="インストール後、実際に作品を閲覧したユーザーの割合です。")
+w_intensity = st.sidebar.slider("Intensity (平均閲覧作品数)", min_value=0, max_value=100, value=15, step=5, help="1ユーザーあたりの平均閲覧作品数で、エンゲージメントの深さを測ります。")
+w_retention = st.sidebar.slider("Retention (D7維持率)", min_value=0, max_value=100, value=20, step=5, help="インストールから7日後もアプリを利用しているユーザーの割合です。")
+w_bm = st.sidebar.slider("BM Contribution (BM利用率)", min_value=0, max_value=100, value=25, step=5, help="ビジネスモデル（課金など）に貢献したユーザーの割合です。")
+w_payback = st.sidebar.slider("Payback (投資回収効率)", min_value=0, max_value=100, value=15, step=5, help="投下した広告費に対する売上の回収効率（ROAS等）を評価します。")
+
+total_weight = w_traffic + w_activation + w_intensity + w_retention + w_bm + w_payback
+
+if total_weight != 100:
+    st.sidebar.warning(f"⚠️ 現在の合計は {total_weight}% です。正確な評価のため 100% に合わせてください。")
+else:
+    st.sidebar.success(f"✅ 合計 100% (最適)")
+
+weights_dict = {
+    'traffic': w_traffic,
+    'activation': w_activation,
+    'intensity': w_intensity,
+    'retention': w_retention,
+    'bm': w_bm,
+    'payback': w_payback
+}
+
+if adj_file and int_file:
+    audit_df = run_growth_audit(pd.read_csv(adj_file), pd.read_csv(int_file), weights_dict)
+
+    if audit_df.empty:
+        st.error("❌ キャンペーンの一致が確認できませんでした。Adjustの'campaign_network'と社内データの'campaign_name'を確認してください。")
+    else:
+        # --- Filters ---
+        st.markdown("### Filters")
+        f1, f2, f3, f4 = st.columns(4)
+        
+        channel_opts = sorted(audit_df['channel'].dropna().unique().tolist())
+        sel_ch = f1.multiselect("Channel", channel_opts, placeholder="All (Select to filter)")
+        
+        os_opts = sorted(audit_df['os_name'].dropna().unique().tolist())
+        sel_os = f2.selectbox("OS", ["All"] + os_opts)
+        
+        campaign_opts = sorted(audit_df['campaign_network'].dropna().unique().tolist())
+        sel_cp = f3.multiselect("Campaign", campaign_opts, placeholder="All (Select to filter)")
+        
+        category_opts = sorted(audit_df['growth_category'].dropna().unique().tolist())
+        sel_ct = f4.selectbox("Growth Category", ["All"] + category_opts)
+
+        f_df = audit_df.copy()
+        if sel_ch: f_df = f_df[f_df['channel'].isin(sel_ch)]
+        if sel_os != "All": f_df = f_df[f_df['os_name'] == sel_os]
+        if sel_cp: f_df = f_df[f_df['campaign_network'].isin(sel_cp)]
+        if sel_ct != "All": f_df = f_df[f_df['growth_category'] == sel_ct]
+
+        # --- Data Sorting & Ranking ---
+        f_df = f_df.sort_values(by=["growth_health_score", "confidence_score"], ascending=[False, False]).reset_index(drop=True)
+        f_df.insert(0, 'Rank', range(1, len(f_df) + 1))
+
+        # --- Overview ---
+        st.markdown("### Overview")
+        k1, k2, k3 = st.columns(3)
+        if len(f_df) > 0:
+            mean_score = f_df['growth_health_score'].mean()
+            mean_conf = f_df['confidence_score'].mean()
+            k1.metric("Average Growth Score", f"{mean_score:.1f}" if pd.notna(mean_score) else "N/A")
+            k2.metric("Average Confidence", f"{mean_conf:.1f}" if pd.notna(mean_conf) else "N/A")
+            k3.metric("Campaigns (Unique)", len(f_df))
+        else:
+            k1.metric("Average Growth Score", "N/A")
+            k2.metric("Average Confidence", "N/A")
+            k3.metric("Campaigns (Unique)", 0)
+
+        # --- Positioning Chart ---
+        st.markdown("### Campaign Positioning")
+        f_df_plot = f_df.copy()
+        np.random.seed(42) 
+        f_df_plot["plot_x"] = f_df_plot["growth_health_score"] + np.random.uniform(-1.0, 1.0, len(f_df_plot))
+        f_df_plot["plot_y"] = f_df_plot["confidence_score"] + np.random.uniform(-1.0, 1.0, len(f_df_plot))
+
+        scatter = alt.Chart(f_df_plot).mark_circle(size=140, opacity=0.7).encode(
+            x=alt.X("plot_x:Q", title="Growth Health Score", scale=alt.Scale(zero=False)),
+            y=alt.Y("plot_y:Q", title="Confidence", scale=alt.Scale(zero=False)),
+            color=alt.Color("growth_category:N", title="Category"),
+            tooltip=["Rank", "campaign_network", "growth_health_score", "confidence_score", "growth_category"]
+        ).properties(height=400).interactive()
+        st.altair_chart(scatter, use_container_width=True)
+
+        # --- Campaign Table & Download CSV ---
+        col_title, col_btn = st.columns([4, 1])
+        col_title.markdown("### Campaign Table")
+        
+        display_cols = [
+            "Rank", "campaign_network", "channel", "os_name", "growth_category", "growth_health_score", "confidence_score",
+            "cpi", "activation", "intensity", "retention_d7", "bm_rate", "payback"
+        ]
+
+        @st.cache_data
+        def convert_df(df):
+            return df.to_csv(index=False).encode('utf-8-sig')
+
+        csv_data = convert_df(f_df[display_cols])
+        col_btn.download_button(label="📥 Download CSV", data=csv_data, file_name='campaign_health_check_ranked.csv', mime='text/csv')
+
+        def style_red(val):
+            return "background-color: rgba(239, 68, 68, 0.2); color: #ef4444;" if isinstance(val, (int, float)) and val < 60 else ""
+        
+        st.dataframe(
+            f_df[display_cols].style
+            .map(style_red, subset=["growth_health_score"])
+            .format({"cpi": "{:.2f}", "activation": "{:.1%}", "intensity": "{:.2f}", "retention_d7": "{:.1%}", "bm_rate": "{:.1%}", "payback": "{:.2f}"}, na_rep="N/A"), 
+            use_container_width=True, height=500, hide_index=True
+        )
+else:
+    st.info("左右のCSVファイルをアップロードしてください。")
